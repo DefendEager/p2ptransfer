@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>自治体対応 安全P2Pファイル・テキスト共有 | E2EE直接通信</title>
+  <meta name="description" content="自治体PCの厳格なセキュリティ制限下でも安全に利用可能な端末間直接通信（P2P）ファイル・テキスト共有システム。サーバーにデータを一切残さないE2EE暗号化、大容量ファイル高速ストリーミング、完全オフライン接続対応。">
+  
+  <!-- Google Fonts: Outfit, Inter, JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- ====================================================================
+         ヘッダーセクション
+         ==================================================================== -->
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="brand-logo" aria-label="システムロゴ">🔒</div>
+        <div class="brand-info">
+          <h1>GovP2P SecureTransfer <span class="brand-badge">自治体準拠 E2EE</span></h1>
+          <p>外部サーバー非経由・端末間直接暗号化共有</p>
+        </div>
+      </div>
+      <div class="header-controls">
+        <div class="security-tag" id="headerSecurityTag" title="Web Crypto AES-256-GCM + DTLS">
+          <span class="security-dot"></span>
+          <span id="securityText">E2EE 256bit 待機中</span>
+        </div>
+        <button id="themeToggleBtn" class="icon-btn" title="テーマ切り替え" aria-label="テーマ切り替え">🌓</button>
+        <button id="securityInfoBtn" class="icon-btn" title="セキュリティ仕様" aria-label="セキュリティ仕様">ℹ️</button>
+      </div>
+    </header>
+
+    <!-- ====================================================================
+         接続セクション（未接続時に表示）
+         ==================================================================== -->
+    <section id="connectionCard" class="card">
+      <div class="card-header">
+        <h2 class="card-title">🔗 端末間ペアリング接続</h2>
+        <!-- 接続モード切替タブ -->
+        <div class="tab-container" role="tablist">
+          <button id="tabOnlineBtn" class="tab-btn active" role="tab" aria-selected="true">⚡ オンライン (PIN/QR)</button>
+          <button id="tabOfflineBtn" class="tab-btn" role="tab" aria-selected="false">🛡️ 閉域網・完全オフライン</button>
+        </div>
+      </div>
+
+      <!-- モード1: オンライン（PIN / QRコード） -->
+      <div id="onlineConnectView" class="connect-view">
+        <div class="connect-grid">
+          
+          <!-- 左側: 自端末のPIN / QRコード（相手に接続してもらう） -->
+          <div class="connect-box">
+            <span class="box-badge">相手から接続してもらう</span>
+            <p style="font-size: 0.85rem; color: var(--text-secondary);">この端末の接続PINコード</p>
+            
+            <div class="pin-display-container">
+              <span id="myPinCode" class="pin-code-large">------</span>
+              <button id="copyPinBtn" class="icon-btn" title="PINをコピー" aria-label="PINをコピー">📋</button>
+              <button id="refreshPinBtn" class="icon-btn" title="PINを再生成" aria-label="PINを再生成">🔄</button>
+            </div>
+
+            <!-- QRコード -->
+            <div id="qrcodeContainer" class="qr-code-wrapper" title="スマホカメラでスキャンして一発接続"></div>
+            <p style="font-size: 0.72rem; color: var(--text-muted);">スマホカメラ等でQRを読み取ると即座に接続できます</p>
+          </div>
+
+          <!-- 右側: 相手のPINを入力して接続 -->
+          <div class="connect-box">
+            <span class="box-badge">相手の端末に接続する</span>
+            <p style="font-size: 0.85rem; color: var(--text-secondary);">相手画面の6桁PINを入力</p>
+
+            <div class="input-group" style="margin-top: 0.5rem;">
+              <input type="text" id="targetPinInput" class="input-pin" placeholder="000000" maxlength="6" inputmode="numeric" pattern="[0-9]*" autocomplete="off">
+            </div>
+
+            <div style="display: flex; gap: 0.5rem; width: 100%; margin-top: 0.5rem;">
+              <button id="connectPinBtn" class="btn-primary" style="flex: 1;">⚡ 接続する</button>
+              <button id="openScannerBtn" class="btn-secondary" title="カメラでQRスキャン">📷 QR読取</button>
+            </div>
+            
+            <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.5rem;">
+              ※PINコードを元にAES-256暗号鍵が自動生成されます
+            </p>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- モード2: 完全オフライン・閉域網モード（手動SDP / QR交換） -->
+      <div id="offlineConnectView" class="connect-view hidden">
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+          外部インターネット接続が遮断された閉域網（LGWAN等）でも、画面上のSDP情報（またはQRコード）を手動交換することで同一LAN内でWebRTC接続を確立します。
+        </p>
+
+        <div class="connect-grid">
+          <!-- オファー側 -->
+          <div class="connect-box" style="text-align: left; align-items: stretch;">
+            <span class="box-badge">ステップ1: オファー端末（送信元など）</span>
+            <button id="generateOfferBtn" class="btn-primary">① オファーSDPを生成</button>
+            
+            <div id="offerOutputGroup" class="hidden" style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem;">
+              <label style="font-size: 0.75rem; color: var(--text-muted);">生成されたオファー情報 (相手へコピーまたはQR表示):</label>
+              <textarea id="offerTextarea" class="textarea-custom" readonly style="height: 70px; font-size: 0.7rem;"></textarea>
+              <button id="copyOfferBtn" class="btn-secondary">📋 オファーをコピー</button>
+            </div>
+
+            <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
+              <label style="font-size: 0.75rem; color: var(--text-muted);">③ 相手のアンサーSDPを貼り付けて接続完了:</label>
+              <textarea id="applyAnswerInput" class="textarea-custom" placeholder="アンサーSDPをここにペースト..." style="height: 60px; font-size: 0.7rem; margin-top: 0.3rem;"></textarea>
+              <button id="applyAnswerBtn" class="btn-primary" style="margin-top: 0.5rem; width: 100%;">接続を完了する</button>
+            </div>
+          </div>
+
+          <!-- アンサー側 -->
+          <div class="connect-box" style="text-align: left; align-items: stretch;">
+            <span class="box-badge">ステップ2: アンサー端末（受信側など）</span>
+            <label style="font-size: 0.75rem; color: var(--text-muted);">② オファーSDPを貼り付け:</label>
+            <textarea id="inputOfferTextarea" class="textarea-custom" placeholder="相手のオファーSDPをペースト..." style="height: 70px; font-size: 0.7rem;"></textarea>
+            <button id="generateAnswerBtn" class="btn-primary" style="margin-top: 0.5rem;">アンサーSDPを生成</button>
+
+            <div id="answerOutputGroup" class="hidden" style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem;">
+              <label style="font-size: 0.75rem; color: var(--text-muted);">生成されたアンサー情報 (オファー側に渡す):</label>
+              <textarea id="answerTextarea" class="textarea-custom" readonly style="height: 70px; font-size: 0.7rem;"></textarea>
+              <button id="copyAnswerBtn" class="btn-secondary">📋 アンサーをコピー</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         接続状態バナー（接続完了時に表示）
+         ==================================================================== -->
+    <div id="connectedBanner" class="connection-status-banner hidden">
+      <div class="status-left">
+        <div class="status-icon-glow">✓</div>
+        <div class="status-text">
+          <h3 id="connectedPeerTitle">端末と直接接続中 (P2P Direct)</h3>
+          <p id="connectedPeerDesc">通信経路: ローカル直接通信 (LAN) | 暗号化: AES-GCM 256bit</p>
+        </div>
+      </div>
+      <div style="display: flex; gap: 0.5rem;">
+        <button id="networkStatsBtn" class="btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.78rem;">📊 接続詳細</button>
+        <button id="disconnectBtn" class="btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.78rem; color: var(--accent-rose);">切断</button>
+      </div>
+    </div>
+
+    <!-- ====================================================================
+         メイン作業エリア（ファイル送信・テキスト共有）
+         ==================================================================== -->
+    <main id="mainWorkspace" class="main-workspace hidden">
+      
+      <!-- 作業タブ（ファイル共有 / テキスト共有） -->
+      <div class="card" style="padding: 1.25rem;">
+        <div class="card-header" style="margin-bottom: 1rem;">
+          <div class="tab-container" role="tablist" style="width: 100%;">
+            <button id="tabFilesBtn" class="tab-btn active" role="tab">📁 ファイル共有（大容量・分割高速転送）</button>
+            <button id="tabTextBtn" class="tab-btn" role="tab">💬 テキスト・メモ即時共有</button>
+          </div>
+        </div>
+
+        <!-- パネル1: ファイル共有 -->
+        <div id="filesView">
+          <!-- ドラッグ＆ドロップゾーン -->
+          <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="ファイルをドロップまたはクリックして選択">
+            <input type="file" id="fileInput" multiple class="hidden">
+            <div class="dropzone-icon">📤</div>
+            <div class="dropzone-text">
+              <h3>ファイルをドラッグ＆ドロップ</h3>
+              <p>またはクリックしてファイルを選択（複数選択対応）</p>
+            </div>
+            <div class="dropzone-limit">
+              ⚡ 64KB最適化チャンク分割 ＆ Backpressure制御によりGB級ファイルも高速・安定転送
+            </div>
+          </div>
+
+          <!-- 送信待機中ファイルリスト -->
+          <div id="stagedFilesContainer" class="staged-files-container hidden">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span style="font-size: 0.85rem; font-weight: 600;">送信対象ファイル (<span id="stagedFileCount">0</span>件 / <span id="stagedTotalSize">0 MB</span>)</span>
+              <button id="clearStagedBtn" class="btn-secondary" style="padding: 0.25rem 0.6rem; font-size: 0.75rem;">クリア</button>
+            </div>
+            <div id="stagedList" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+            <button id="startSendFilesBtn" class="btn-primary" style="margin-top: 0.75rem; width: 100%;">
+              🚀 安全に高速送信を開始する (E2EE暗号化)
+            </button>
+          </div>
+        </div>
+
+        <!-- パネル2: テキスト即時共有 -->
+        <div id="textView" class="text-share-container hidden">
+          <div id="textHistoryBox" class="text-history-box" aria-live="polite">
+            <div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; margin: auto;">
+              メッセージや共有メモを送信すると、相手の端末に即座に表示されます
+            </div>
+          </div>
+
+          <div class="text-input-row">
+            <textarea id="textMessageInput" class="textarea-custom" placeholder="共有したいテキスト、URL、メモを入力... (Enterで送信, Shift+Enterで改行)"></textarea>
+            <button id="sendTextBtn" class="btn-primary" style="align-self: flex-end;">送信</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ====================================================================
+           リアルタイム転送モニター（転送中に表示）
+           ==================================================================== -->
+      <section id="transferMonitor" class="transfer-monitor-card hidden" aria-live="polite">
+        <div class="monitor-header">
+          <div class="monitor-file-name">
+            <span id="monitorDirectionIcon">📤</span>
+            <span id="monitorFileName">ファイル名</span>
+            <span id="monitorStatusBadge" class="brand-badge">送信中</span>
+          </div>
+          <div class="monitor-stats">
+            <span id="monitorSpeed">0.0 MB/s</span>
+            <span id="monitorEta">残り --秒</span>
+            <span id="monitorProgressPercent" style="font-weight: 700;">0%</span>
+          </div>
+        </div>
+
+        <div class="progress-track">
+          <div id="monitorProgressFill" class="progress-fill"></div>
+        </div>
+
+        <div class="monitor-footer">
+          <span id="monitorTransferredSize">0 MB / 0 MB</span>
+          <span id="monitorSha256" class="sha256-badge" title="SHA-256 ハッシュ値">SHA-256: 計算中...</span>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           受信完了・転送履歴リスト
+           ==================================================================== -->
+      <section id="historySection" class="card">
+        <div class="card-header">
+          <h3 class="card-title">📋 転送履歴・受信済みファイル</h3>
+          <button id="clearHistoryBtn" class="btn-secondary" style="padding: 0.25rem 0.6rem; font-size: 0.75rem;">履歴消去</button>
+        </div>
+        <div id="historyList" class="history-list">
+          <p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">
+            転送履歴はまだありません
+          </p>
+        </div>
+      </section>
+
+    </main>
+
+  </div>
+
+  <!-- ====================================================================
+       モーダル: カメラQRコードスキャナー
+       ==================================================================== -->
+  <div id="scannerModal" class="modal-backdrop">
+    <div class="modal-card">
+      <button class="modal-close-btn" id="closeScannerModalBtn" aria-label="閉じる">✕</button>
+      <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">📷 QRコードをスキャン</h3>
+      <p style="font-size: 0.8rem; color: var(--text-secondary);">相手の画面に表示されているQRコードを枠内に収めてください</p>
+      
+      <div class="scanner-video-container">
+        <video id="scannerVideo" class="scanner-video" playsinline></video>
+        <div class="scanner-target-box"></div>
+      </div>
+
+      <div style="text-align: center;">
+        <button id="stopScannerBtn" class="btn-secondary">スキャンをキャンセル</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       モーダル: セキュリティ仕様 ＆ 接続詳細
+       ==================================================================== -->
+  <div id="securityModal" class="modal-backdrop">
+    <div class="modal-card" style="max-width: 580px;">
+      <button class="modal-close-btn" id="closeSecurityModalBtn" aria-label="閉じる">✕</button>
+      <h3 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+        🛡️ 自治体セキュリティ基準と技術仕様
+      </h3>
+      
+      <div style="display: flex; flex-direction: column; gap: 0.85rem; font-size: 0.82rem; line-height: 1.6; color: var(--text-secondary);">
+        <div style="background: var(--bg-glass); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+          <strong style="color: var(--accent-emerald);">1. サーバー非経由・完全P2P (ゼロログ)</strong><br>
+          ファイルやテキストはクラウドや外部サーバーに一切送信・保存されません。ブラウザ端末間で直接通信します。
+        </div>
+
+        <div style="background: var(--bg-glass); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+          <strong style="color: var(--accent-blue);">2. Web Crypto 二重暗号化 (E2EE)</strong><br>
+          トランスポート層の WebRTC DTLS 1.3 暗号化に加え、Web Crypto API による <strong>AES-256-GCM</strong> で二重暗号化。中間者やシグナリングサーバーでも復号は数学的に不可能です。
+        </div>
+
+        <div style="background: var(--bg-glass); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+          <strong style="color: var(--accent-amber);">3. SHA-256 完全性検証</strong><br>
+          大容量ファイル転送完了時に自動でSHA-256ハッシュ値を照合し、データの破損や改ざんがないことを保証します。
+        </div>
+
+        <div style="background: var(--bg-glass); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+          <strong style="color: var(--accent-indigo);">4. 閉域網・完全オフライン対応</strong><br>
+          外部インターネットが遮断されたLGWANや隔離LAN環境でも、手動SDP/QR交換により100%動作します。
+        </div>
+      </div>
+
+      <div id="liveConnectionStats" style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color); font-size: 0.78rem;">
+        <strong>現在の通信ステータス:</strong>
+        <div id="statsContent" style="font-family: var(--font-mono); margin-top: 0.35rem; color: var(--accent-blue);">
+          未接続
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- トースト通知コンテナ -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <!-- スクリプト読み込み（完全オフライン対応） -->
+  <script src="libs/qrcode.min.js"></script>
+  <script src="libs/jsQR.min.js"></script>
+  <script src="libs/peerjs.min.js"></script>
+  
+  <script src="js/crypto.js"></script>
+  <script src="js/webrtc.js"></script>
+  <script src="js/signaling.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
