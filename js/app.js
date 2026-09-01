@@ -1,20 +1,19 @@
 /**
  * アプリケーションメインエントリーポイント
- * 各モジュール（Crypto, WebRTC Engine, Signaling, DynamicQR, UI）を連携し、
- * イベントハンドリング、ファイルドラッグ＆ドロップ、複数送信キュー等を制御します。
+ * 各モジュール（Crypto, Relay Transfer, WebRTC Engine, Signaling, UI）を連携
  */
 
 document.addEventListener('DOMContentLoaded', () => {
   // 1. UIマネージャー初期化
   const ui = new UIManager();
 
-  // 2. 動的QR光転送エンジン初期化（厳格セキュリティ下モード用）
-  const dynamicQr = new DynamicQRTransfer();
+  // 2. E2EEゼロ知識HTTPSリレーエンジン初期化（推奨メインモード）
+  const relayTransfer = new E2EERelayTransfer();
 
   // 3. WebRTC転送エンジン初期化
   const engine = new P2PTransferEngine({
     onStatusChange: (state, info) => {
-      console.log(`[App] 接続ステータス変更: ${state}`);
+      console.log(`[App] WebRTCステータス: ${state}`);
       if (state === 'open' || state === 'connected' || state === 'completed') {
         onConnectedState(info);
       } else if (state === 'closed' || state === 'failed' || state === 'disconnected') {
@@ -25,7 +24,6 @@ document.addEventListener('DOMContentLoaded', () => {
       ui.updateTransferMonitor(progressData);
     },
     onFileReceived: (fileData) => {
-      console.log('[App] ファイル受信完了:', fileData.name);
       ui.updateTransferMonitor({
         ...fileData,
         progress: 100,
@@ -34,31 +32,19 @@ document.addEventListener('DOMContentLoaded', () => {
         direction: 'receive',
         status: 'completed'
       });
-
-      ui.addHistoryItem({
-        ...fileData,
-        direction: 'receive'
-      });
-
+      ui.addHistoryItem({ ...fileData, direction: 'receive' });
       ui.showToast(`ファイル「${fileData.name}」を受信しました`, 'info');
       setTimeout(() => ui.hideTransferMonitor(), 3000);
     },
     onTextReceived: (msgData) => {
       ui.addTextMessage(msgData, false);
       ui.showToast(`${msgData.sender}: ${msgData.text.substring(0, 20)}...`, 'info');
-
-      // テキスト受信時に自動でテキストタブに切り替え
       const tabTextBtn = document.getElementById('tabTextBtn');
-      if (tabTextBtn) {
-        tabTextBtn.click();
-      }
+      if (tabTextBtn) tabTextBtn.click();
     },
     onError: (err) => {
-      console.error('[App] エラー:', err);
-      ui.showToast(err.message || '通信エラーが発生しました', 'error');
-    },
-    onStatsUpdate: (stats) => {
-      updateLiveStats(stats);
+      console.error('[App] WebRTCエラー:', err);
+      ui.showToast(err.message || '通信エラー', 'error');
     }
   });
 
@@ -78,10 +64,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 送信待機中ファイルキュー
+  // 状態変数
+  let selectedRelayFile = null;
   let stagedFiles = [];
   let isTransferring = false;
-  let selectedStrictFile = null;
 
   // ========================================================================
   // DOM要素参照
@@ -90,10 +76,32 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeSecurityModalBtn = document.getElementById('closeSecurityModalBtn');
   const securityModal = document.getElementById('securityModal');
 
-  // 接続関連要素
-  const connectionCard = document.getElementById('connectionCard');
-  const connectedBanner = document.getElementById('connectedBanner');
-  const mainWorkspace = document.getElementById('mainWorkspace');
+  // タブ切替
+  const tabRelayBtn = document.getElementById('tabRelayBtn');
+  const tabOnlineBtn = document.getElementById('tabOnlineBtn');
+  const tabOfflineBtn = document.getElementById('tabOfflineBtn');
+  const relayConnectView = document.getElementById('relayConnectView');
+  const onlineConnectView = document.getElementById('onlineConnectView');
+  const offlineConnectView = document.getElementById('offlineConnectView');
+
+  // 高速E2EEリレー要素
+  const relayDropzone = document.getElementById('relayDropzone');
+  const relayFileInput = document.getElementById('relayFileInput');
+  const relaySelectedFileName = document.getElementById('relaySelectedFileName');
+  const relaySendPin = document.getElementById('relaySendPin');
+  const genRelayPinBtn = document.getElementById('genRelayPinBtn');
+  const startRelaySendBtn = document.getElementById('startRelaySendBtn');
+  const relaySendResult = document.getElementById('relaySendResult');
+  const relayResultQrcode = document.getElementById('relayResultQrcode');
+  const relayResultPinText = document.getElementById('relayResultPinText');
+
+  const relayReceiveUrlInput = document.getElementById('relayReceiveUrlInput');
+  const openRelayScannerBtn = document.getElementById('openRelayScannerBtn');
+  const relayReceivePin = document.getElementById('relayReceivePin');
+  const startRelayReceiveBtn = document.getElementById('startRelayReceiveBtn');
+  const relayReceiveResult = document.getElementById('relayReceiveResult');
+
+  // 直接P2P要素
   const myPinCodeEl = document.getElementById('myPinCode');
   const qrcodeContainer = document.getElementById('qrcodeContainer');
   const copyPinBtn = document.getElementById('copyPinBtn');
@@ -104,18 +112,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const openScannerBtn = document.getElementById('openScannerBtn');
   const stopScannerBtn = document.getElementById('stopScannerBtn');
   const closeScannerModalBtn = document.getElementById('closeScannerModalBtn');
+
+  const connectionCard = document.getElementById('connectionCard');
+  const connectedBanner = document.getElementById('connectedBanner');
+  const mainWorkspace = document.getElementById('mainWorkspace');
   const disconnectBtn = document.getElementById('disconnectBtn');
-  const networkStatsBtn = document.getElementById('networkStatsBtn');
 
-  // 接続モードタブ (オンライン / オフライン / 厳格セキュリティ下)
-  const tabOnlineBtn = document.getElementById('tabOnlineBtn');
-  const tabOfflineBtn = document.getElementById('tabOfflineBtn');
-  const tabStrictQrBtn = document.getElementById('tabStrictQrBtn');
-  const onlineConnectView = document.getElementById('onlineConnectView');
-  const offlineConnectView = document.getElementById('offlineConnectView');
-  const strictQrConnectView = document.getElementById('strictQrConnectView');
-
-  // オフライン接続関連
+  // オフライン手動SDP要素
   const generateOfferBtn = document.getElementById('generateOfferBtn');
   const offerOutputGroup = document.getElementById('offerOutputGroup');
   const offerTextarea = document.getElementById('offerTextarea');
@@ -128,42 +131,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const applyAnswerInput = document.getElementById('applyAnswerInput');
   const applyAnswerBtn = document.getElementById('applyAnswerBtn');
 
-  // 厳格セキュリティ下 (動的QR) 関連要素
-  const tabQrSendBtn = document.getElementById('tabQrSendBtn');
-  const tabQrReceiveBtn = document.getElementById('tabQrReceiveBtn');
-  const qrSendPanel = document.getElementById('qrSendPanel');
-  const qrReceivePanel = document.getElementById('qrReceivePanel');
-  const selectQrFileBtn = document.getElementById('selectQrFileBtn');
-  const strictQrFileInput = document.getElementById('strictQrFileInput');
-  const startQrSendBtn = document.getElementById('startQrSendBtn');
-  const stopQrSendBtn = document.getElementById('stopQrSendBtn');
-  const strictQrFileInfo = document.getElementById('strictQrFileInfo');
-  const strictQrFileName = document.getElementById('strictQrFileName');
-  const strictQrFileSize = document.getElementById('strictQrFileSize');
-  const dynamicQrDisplayArea = document.getElementById('dynamicQrDisplayArea');
-  const dynamicQrContainer = document.getElementById('dynamicQrContainer');
-  const qrFrameCurrent = document.getElementById('qrFrameCurrent');
-  const qrFrameTotal = document.getElementById('qrFrameTotal');
-  const qrFramePercent = document.getElementById('qrFramePercent');
-
-  const startQrReceiveBtn = document.getElementById('startQrReceiveBtn');
-  const stopQrReceiveBtn = document.getElementById('stopQrReceiveBtn');
-  const qrScannerContainer = document.getElementById('qrScannerContainer');
-  const strictQrVideo = document.getElementById('strictQrVideo');
-  const strictReceiveCount = document.getElementById('strictReceiveCount');
-  const strictReceiveTotal = document.getElementById('strictReceiveTotal');
-  const strictReceivePercent = document.getElementById('strictReceivePercent');
-  const strictReceiveProgressFill = document.getElementById('strictReceiveProgressFill');
-  const strictReceiveFileName = document.getElementById('strictReceiveFileName');
-  const strictReceiveResult = document.getElementById('strictReceiveResult');
-
-  // 作業エリア関連
+  // P2Pワークスペース要素
   const tabFilesBtn = document.getElementById('tabFilesBtn');
   const tabTextBtn = document.getElementById('tabTextBtn');
   const filesView = document.getElementById('filesView');
   const textView = document.getElementById('textView');
-
-  // ファイル操作関連
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
   const stagedFilesContainer = document.getElementById('stagedFilesContainer');
@@ -173,189 +145,190 @@ document.addEventListener('DOMContentLoaded', () => {
   const clearStagedBtn = document.getElementById('clearStagedBtn');
   const startSendFilesBtn = document.getElementById('startSendFilesBtn');
   const clearHistoryBtn = document.getElementById('clearHistoryBtn');
-
-  // テキスト共有関連
   const textMessageInput = document.getElementById('textMessageInput');
   const sendTextBtn = document.getElementById('sendTextBtn');
 
   // ========================================================================
-  // イベントリスナーの即時登録（非同期処理の成否に依存させない最優先登録）
+  // 初期PIN生成（リレー用）
+  // ========================================================================
+  function generateRandomPin() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+  if (relaySendPin) relaySendPin.value = generateRandomPin();
+
+  // ========================================================================
+  // イベントリスナーの即時・同期登録
   // ========================================================================
 
-  // 1. 接続タブ切替 (オンライン / オフライン / 厳格セキュリティ下)
+  // 1. メインタブ切替
+  if (tabRelayBtn) {
+    tabRelayBtn.addEventListener('click', () => {
+      tabRelayBtn.classList.add('active');
+      tabOnlineBtn.classList.remove('active');
+      tabOfflineBtn.classList.remove('active');
+      relayConnectView.classList.remove('hidden');
+      onlineConnectView.classList.add('hidden');
+      offlineConnectView.classList.add('hidden');
+    });
+  }
+
   if (tabOnlineBtn) {
     tabOnlineBtn.addEventListener('click', () => {
       tabOnlineBtn.classList.add('active');
+      tabRelayBtn.classList.remove('active');
       tabOfflineBtn.classList.remove('active');
-      tabStrictQrBtn.classList.remove('active');
       onlineConnectView.classList.remove('hidden');
+      relayConnectView.classList.add('hidden');
       offlineConnectView.classList.add('hidden');
-      strictQrConnectView.classList.add('hidden');
     });
   }
 
   if (tabOfflineBtn) {
     tabOfflineBtn.addEventListener('click', () => {
       tabOfflineBtn.classList.add('active');
+      tabRelayBtn.classList.remove('active');
       tabOnlineBtn.classList.remove('active');
-      tabStrictQrBtn.classList.remove('active');
       offlineConnectView.classList.remove('hidden');
+      relayConnectView.classList.add('hidden');
       onlineConnectView.classList.add('hidden');
-      strictQrConnectView.classList.add('hidden');
     });
   }
 
-  if (tabStrictQrBtn) {
-    tabStrictQrBtn.addEventListener('click', () => {
-      tabStrictQrBtn.classList.add('active');
-      tabOnlineBtn.classList.remove('active');
-      tabOfflineBtn.classList.remove('active');
-      strictQrConnectView.classList.remove('hidden');
-      onlineConnectView.classList.add('hidden');
-      offlineConnectView.classList.add('hidden');
-    });
-  }
-
-  // 2. 厳格セキュリティ下（動的QR）サブタブ切替
-  if (tabQrSendBtn) {
-    tabQrSendBtn.addEventListener('click', () => {
-      tabQrSendBtn.classList.add('active');
-      tabQrReceiveBtn.classList.remove('active');
-      qrSendPanel.classList.remove('hidden');
-      qrReceivePanel.classList.add('hidden');
-      dynamicQr.stopReceiving();
-    });
-  }
-
-  if (tabQrReceiveBtn) {
-    tabQrReceiveBtn.addEventListener('click', () => {
-      tabQrReceiveBtn.classList.add('active');
-      tabQrSendBtn.classList.remove('active');
-      qrReceivePanel.classList.remove('hidden');
-      qrSendPanel.classList.add('hidden');
-      dynamicQr.stopTransmission();
-    });
-  }
-
-  // 3. 動的QRファイル選択・送信
-  if (selectQrFileBtn && strictQrFileInput) {
-    selectQrFileBtn.addEventListener('click', () => strictQrFileInput.click());
-
-    strictQrFileInput.addEventListener('change', (e) => {
+  // 2. 高速E2EEリレー送信
+  if (relayDropzone && relayFileInput) {
+    relayDropzone.addEventListener('click', () => relayFileInput.click());
+    relayFileInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length > 0) {
-        selectedStrictFile = e.target.files[0];
-        strictQrFileName.textContent = selectedStrictFile.name;
-        strictQrFileSize.textContent = ui.formatBytes(selectedStrictFile.size);
-        strictQrFileInfo.classList.remove('hidden');
-        startQrSendBtn.disabled = false;
+        selectedRelayFile = e.target.files[0];
+        relaySelectedFileName.textContent = `${selectedRelayFile.name} (${ui.formatBytes(selectedRelayFile.size)})`;
+        startRelaySendBtn.disabled = false;
       }
     });
   }
 
-  if (startQrSendBtn) {
-    startQrSendBtn.addEventListener('click', async () => {
-      if (!selectedStrictFile) return;
+  if (genRelayPinBtn && relaySendPin) {
+    genRelayPinBtn.addEventListener('click', () => {
+      relaySendPin.value = generateRandomPin();
+      ui.showToast('新しい暗号化PINを生成しました', 'info');
+    });
+  }
 
-      const densitySelect = document.getElementById('qrDensitySelect');
-      const fpsSelect = document.getElementById('qrFpsSelect');
-      if (densitySelect) dynamicQr.setDensityMode(densitySelect.value);
-      if (fpsSelect) dynamicQr.setFps(parseInt(fpsSelect.value, 10));
+  if (startRelaySendBtn) {
+    startRelaySendBtn.addEventListener('click', async () => {
+      if (!selectedRelayFile) return;
+      const pin = relaySendPin.value.trim();
+      if (!pin || pin.length < 4) {
+        ui.showToast('4桁以上のPINコードを入力してください', 'error');
+        return;
+      }
 
-      startQrSendBtn.classList.add('hidden');
-      stopQrSendBtn.classList.remove('hidden');
-      dynamicQrDisplayArea.classList.remove('hidden');
+      startRelaySendBtn.disabled = true;
+      startRelaySendBtn.textContent = '暗号化＆送信中...';
 
       try {
-        ui.showToast('ファイルをGzip圧縮して動的QRパケットを構築中...', 'info');
-        const prep = await dynamicQr.prepareTransmission(selectedStrictFile);
-        qrFrameTotal.textContent = prep.totalChunks;
-
-        dynamicQr.startTransmission(dynamicQrContainer, (progress) => {
-          qrFrameCurrent.textContent = progress.current;
-          qrFramePercent.textContent = `${progress.percent}%`;
+        ui.showToast('ブラウザ内でAES-256-GCM暗号化して送信中...', 'info');
+        const result = await relayTransfer.sendFile(selectedRelayFile, pin, (progress) => {
+          startRelaySendBtn.textContent = `${progress.status} (${progress.percent}%)`;
         });
-        ui.showToast(`動的QR送信を開始しました (全${prep.totalChunks}コマ)`, 'info');
+
+        ui.showToast(`「${result.fileName}」の暗号化送信が完了しました！`, 'info');
+
+        // 結果エリアとQRコード表示
+        relaySendResult.classList.remove('hidden');
+        relayResultPinText.textContent = pin;
+
+        // スマホで一発受信できるURLをQR化
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('relay_token', result.token);
+        currentUrl.searchParams.set('pin', pin);
+        ui.renderQRCode(relayResultQrcode, currentUrl.toString(), 200);
+
       } catch (err) {
         console.error(err);
-        ui.showToast(`動的QR送信エラー: ${err.message}`, 'error');
-        startQrSendBtn.classList.remove('hidden');
-        stopQrSendBtn.classList.add('hidden');
+        ui.showToast(`送信エラー: ${err.message}`, 'error');
+      } finally {
+        startRelaySendBtn.disabled = false;
+        startRelaySendBtn.textContent = '暗号化して高速送信';
       }
     });
   }
 
-  if (stopQrSendBtn) {
-    stopQrSendBtn.addEventListener('click', () => {
-      dynamicQr.stopTransmission();
-      startQrSendBtn.classList.remove('hidden');
-      stopQrSendBtn.classList.add('hidden');
-      dynamicQrDisplayArea.classList.add('hidden');
-      ui.showToast('動的QR送信を停止しました', 'info');
-    });
-  }
+  // 3. 高速E2EEリレー受信
+  if (startRelayReceiveBtn) {
+    startRelayReceiveBtn.addEventListener('click', async () => {
+      const urlOrToken = relayReceiveUrlInput.value.trim();
+      const pin = relayReceivePin.value.trim();
 
-  // 4. 動的QRカメラ受信
-  if (startQrReceiveBtn) {
-    startQrReceiveBtn.addEventListener('click', async () => {
-      startQrReceiveBtn.classList.add('hidden');
-      stopQrReceiveBtn.classList.remove('hidden');
-      qrScannerContainer.classList.remove('hidden');
-      strictReceiveResult.classList.add('hidden');
+      if (!urlOrToken) {
+        ui.showToast('ダウンロードURLまたはコードを入力してください', 'error');
+        return;
+      }
+      if (!pin || pin.length < 4) {
+        ui.showToast('復号PINコードを入力してください', 'error');
+        return;
+      }
 
-      await dynamicQr.startReceiving(
-        strictQrVideo,
-        (progress) => {
-          strictReceiveCount.textContent = progress.received;
-          strictReceiveTotal.textContent = progress.total;
-          strictReceivePercent.textContent = `${progress.percent}%`;
-          strictReceiveProgressFill.style.width = `${progress.percent}%`;
-          strictReceiveFileName.textContent = `受信中: ${progress.fileName} (${ui.formatBytes(progress.rawSize)})`;
-        },
-        (completeData) => {
-          ui.showToast(`「${completeData.fileName}」の復元が完了しました`, 'info');
-          startQrReceiveBtn.classList.remove('hidden');
-          stopQrReceiveBtn.classList.add('hidden');
+      startRelayReceiveBtn.disabled = true;
+      startRelayReceiveBtn.textContent = '受信＆復号中...';
+      relayReceiveResult.classList.add('hidden');
 
-          const downloadUrl = URL.createObjectURL(completeData.blob);
-          strictReceiveResult.classList.remove('hidden');
-          strictReceiveResult.innerHTML = `
-            <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <div style="font-weight: 600; color: var(--text-primary); font-size: 0.88rem;">${ui.escapeHtml(completeData.fileName)}</div>
-                <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.2rem; font-family: var(--font-mono);">
-                  ${ui.formatBytes(completeData.size)} | SHA-256検証済 (${completeData.durationSeconds.toFixed(1)}秒)
-                </div>
+      try {
+        ui.showToast('暗号化バイナリを受信してAES-256復号中...', 'info');
+        const result = await relayTransfer.receiveFile(urlOrToken, pin, (progress) => {
+          startRelayReceiveBtn.textContent = `${progress.status} (${progress.percent}%)`;
+        });
+
+        ui.showToast(`「${result.fileName}」の復号と完全性検証が完了しました！`, 'info');
+
+        const downloadUrl = URL.createObjectURL(result.blob);
+        relayReceiveResult.classList.remove('hidden');
+        relayReceiveResult.innerHTML = `
+          <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1.25rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">${ui.escapeHtml(result.fileName)}</div>
+              <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.35rem; font-family: var(--font-mono);">
+                ${ui.formatBytes(result.size)} | SHA-256検証済 (${result.durationSeconds.toFixed(1)}秒)
               </div>
-              <a href="${downloadUrl}" download="${ui.escapeHtml(completeData.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.45rem 1rem;">
-                保存
-              </a>
             </div>
-          `;
-        },
-        (err) => {
-          ui.showToast(err.message, 'error');
-          startQrReceiveBtn.classList.remove('hidden');
-          stopQrReceiveBtn.classList.add('hidden');
+            <a href="${downloadUrl}" download="${ui.escapeHtml(result.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.55rem 1.2rem;">
+              保存
+            </a>
+          </div>
+        `;
+
+      } catch (err) {
+        console.error(err);
+        ui.showToast(`受信・復号失敗: ${err.message}`, 'error');
+      } finally {
+        startRelayReceiveBtn.disabled = false;
+        startRelayReceiveBtn.textContent = '受信・復号して保存';
+      }
+    });
+  }
+
+  // リレー受信用QRスキャナー
+  if (openRelayScannerBtn) {
+    openRelayScannerBtn.addEventListener('click', () => {
+      ui.startQRScanner(async (data) => {
+        try {
+          const url = new URL(data);
+          const relayToken = url.searchParams.get('relay_token');
+          const pin = url.searchParams.get('pin');
+          if (relayToken) relayReceiveUrlInput.value = relayToken;
+          if (pin) relayReceivePin.value = pin;
+          ui.showToast('QRコードから受信情報を読み取りました', 'info');
+        } catch (e) {
+          relayReceiveUrlInput.value = data;
         }
-      );
+      });
     });
   }
 
-  if (stopQrReceiveBtn) {
-    stopQrReceiveBtn.addEventListener('click', () => {
-      dynamicQr.stopReceiving();
-      startQrReceiveBtn.classList.remove('hidden');
-      stopQrReceiveBtn.classList.add('hidden');
-      ui.showToast('スキャンを停止しました', 'info');
-    });
-  }
-
-  // 5. 接続ボタン ＆ キャンセル制御
-  async function executeConnect(pin) {
+  // 4. 直接P2P接続制御
+  async function executeP2PConnect(pin) {
     connectPinBtn.classList.add('hidden');
     cancelConnectBtn.classList.remove('hidden');
     targetPinInput.disabled = true;
-
     try {
       await signaling.joinSession(pin);
     } catch (e) {
@@ -374,7 +347,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ui.showToast('PINコードを正しく入力してください', 'error');
         return;
       }
-      executeConnect(pin);
+      executeP2PConnect(pin);
     });
   }
 
@@ -388,7 +361,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 6. QRコードスキャナーモーダル
   if (openScannerBtn) {
     openScannerBtn.addEventListener('click', () => {
       ui.startQRScanner(async (data) => {
@@ -398,10 +370,9 @@ document.addEventListener('DOMContentLoaded', () => {
           const pinFromUrl = url.searchParams.get('pin');
           if (pinFromUrl) pinToUse = pinFromUrl;
         } catch (e) {}
-
         targetPinInput.value = pinToUse;
         ui.showToast(`PIN [${pinToUse}] を読み取りました。接続中...`, 'info');
-        executeConnect(pinToUse);
+        executeP2PConnect(pinToUse);
       });
     });
   }
@@ -409,7 +380,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (stopScannerBtn) stopScannerBtn.addEventListener('click', () => ui.stopQRScanner());
   if (closeScannerModalBtn) closeScannerModalBtn.addEventListener('click', () => ui.stopQRScanner());
 
-  // 7. PINコピー・再生成
   if (copyPinBtn) {
     copyPinBtn.addEventListener('click', async () => {
       const pin = myPinCodeEl.textContent;
@@ -427,7 +397,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 8. 切断ボタン
   if (disconnectBtn) {
     disconnectBtn.addEventListener('click', () => {
       if (confirm('接続を切断しますか？')) {
@@ -440,7 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 9. オフライン手動SDP
+  // 5. オフライン手動SDP
   if (generateOfferBtn) {
     generateOfferBtn.addEventListener('click', async () => {
       generateOfferBtn.disabled = true;
@@ -516,7 +485,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 10. メイン作業エリアタブ (ファイル / テキスト)
+  // 6. P2Pワークスペース操作
   if (tabFilesBtn) {
     tabFilesBtn.addEventListener('click', () => {
       tabFilesBtn.classList.add('active');
@@ -535,19 +504,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 11. ファイルドラッグ＆ドロップ
   if (dropzone && fileInput) {
     dropzone.addEventListener('click', () => fileInput.click());
-
     dropzone.addEventListener('dragover', (e) => {
       e.preventDefault();
       dropzone.classList.add('drag-over');
     });
-
-    dropzone.addEventListener('dragleave', () => {
-      dropzone.classList.remove('drag-over');
-    });
-
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.classList.remove('drag-over');
@@ -555,7 +518,6 @@ document.addEventListener('DOMContentLoaded', () => {
         addFilesToStage(Array.from(e.dataTransfer.files));
       }
     });
-
     fileInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length > 0) {
         addFilesToStage(Array.from(e.target.files));
@@ -575,10 +537,8 @@ document.addEventListener('DOMContentLoaded', () => {
       stagedFilesContainer.classList.add('hidden');
       return;
     }
-
     stagedFilesContainer.classList.remove('hidden');
     stagedFileCount.textContent = stagedFiles.length;
-
     let totalBytes = 0;
     stagedFiles.forEach((file, index) => {
       totalBytes += file.size;
@@ -591,13 +551,11 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="file-size">${ui.formatBytes(file.size)}</span>
           </div>
         </div>
-        <button class="remove-staged-btn" data-index="${index}" title="削除">削除</button>
+        <button class="remove-staged-btn" data-index="${index}">削除</button>
       `;
       stagedList.appendChild(itemEl);
     });
-
     stagedTotalSize.textContent = ui.formatBytes(totalBytes);
-
     stagedList.querySelectorAll('.remove-staged-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.dataset.index, 10);
@@ -614,11 +572,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 12. ファイル送信実行
   if (startSendFilesBtn) {
     startSendFilesBtn.addEventListener('click', async () => {
       if (isTransferring || stagedFiles.length === 0) return;
-
       isTransferring = true;
       startSendFilesBtn.disabled = true;
       const filesToSend = [...stagedFiles];
@@ -628,7 +584,6 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
           ui.showToast(`[${i+1}/${filesToSend.length}] 「${file.name}」の送信を開始`, 'info');
           const result = await engine.sendFile(file);
-
           ui.addHistoryItem({
             name: file.name,
             size: file.size,
@@ -638,15 +593,13 @@ document.addEventListener('DOMContentLoaded', () => {
             durationSeconds: result.durationSeconds,
             direction: 'send'
           });
-
           ui.showToast(`「${file.name}」の送信が完了しました`, 'info');
         } catch (err) {
-          console.error('ファイル送信エラー:', err);
-          ui.showToast(`「${file.name}」の送信に失敗しました: ${err.message}`, 'error');
+          console.error(err);
+          ui.showToast(`送信失敗: ${err.message}`, 'error');
           break;
         }
       }
-
       stagedFiles = [];
       renderStagedFiles();
       isTransferring = false;
@@ -659,29 +612,18 @@ document.addEventListener('DOMContentLoaded', () => {
     clearHistoryBtn.addEventListener('click', () => {
       const list = document.getElementById('historyList');
       if (list) {
-        list.innerHTML = `
-          <p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">
-            転送履歴はありません
-          </p>
-        `;
+        list.innerHTML = `<p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">転送履歴はありません</p>`;
         ui.showToast('履歴を消去しました', 'info');
       }
     });
   }
 
-  // 13. テキスト送信
   async function handleSendTextMessage() {
     const text = textMessageInput.value.trim();
     if (!text) return;
-
     try {
       await engine.sendTextMessage(text, '送信');
-      ui.addTextMessage({
-        sender: '送信',
-        text: text,
-        timestamp: Date.now()
-      }, true);
-
+      ui.addTextMessage({ sender: '送信', text: text, timestamp: Date.now() }, true);
       textMessageInput.value = '';
     } catch (e) {
       ui.showToast(`メッセージ送信失敗: ${e.message}`, 'error');
@@ -689,7 +631,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   if (sendTextBtn) sendTextBtn.addEventListener('click', handleSendTextMessage);
-
   if (textMessageInput) {
     textMessageInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -699,9 +640,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 14. モーダル
+  // モーダル
   if (securityInfoBtn) securityInfoBtn.addEventListener('click', () => securityModal.classList.add('open'));
-  if (networkStatsBtn) networkStatsBtn.addEventListener('click', () => securityModal.classList.add('open'));
   if (closeSecurityModalBtn) closeSecurityModalBtn.addEventListener('click', () => securityModal.classList.remove('open'));
 
   // ========================================================================
@@ -712,17 +652,10 @@ document.addEventListener('DOMContentLoaded', () => {
     connectedBanner.classList.remove('hidden');
     mainWorkspace.classList.remove('hidden');
 
-    const secTag = document.getElementById('headerSecurityTag');
-    const secText = document.getElementById('securityText');
-    if (secTag && secText) {
-      secText.textContent = 'E2EE AES-256 接続中';
-    }
-
     const peerTitle = document.getElementById('connectedPeerTitle');
     const peerDesc = document.getElementById('connectedPeerDesc');
     const pinStr = signaling.currentPin ? `PIN: ${signaling.currentPin}` : 'P2P Direct';
-    if (peerTitle) peerTitle.textContent = `接続中 (${pinStr})`;
-    
+    if (peerTitle) peerTitle.textContent = `P2P接続中 (${pinStr})`;
     if (info && peerDesc) {
       peerDesc.textContent = `経路: ${info.connectionType || 'P2P Direct'} | 遅延: ${info.rtt || '< 1 ms'}`;
     }
@@ -732,61 +665,55 @@ document.addEventListener('DOMContentLoaded', () => {
     connectionCard.classList.remove('hidden');
     connectedBanner.classList.add('hidden');
     mainWorkspace.classList.add('hidden');
-
-    const secTag = document.getElementById('headerSecurityTag');
-    const secText = document.getElementById('securityText');
-    if (secTag && secText) {
-      secText.textContent = 'E2EE 256bit 待機中';
-    }
-  }
-
-  function updateLiveStats(stats) {
-    const statsEl = document.getElementById('statsContent');
-    if (!statsEl) return;
-    statsEl.innerHTML = `
-      状態: ${stats.dataChannelState === 'open' ? '通信可能' : stats.dataChannelState}<br>
-      経路: ${stats.connectionType}<br>
-      遅延: ${stats.rtt}<br>
-      暗号化: Web Crypto AES-256-GCM + DTLS
-    `;
   }
 
   // ========================================================================
-  // 初期化＆ホストセッション（全イベント登録後に安全に非同期実行）
+  // 初期化＆URLパラメータ自動チェック
   // ========================================================================
   async function initHostSession() {
     try {
       const { pin } = await signaling.hostSession();
       myPinCodeEl.textContent = pin;
-      
       const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.set('pin', pin);
-      ui.renderQRCode(qrcodeContainer, currentUrl.toString());
-      console.log(`[App] ホストセッション開始 PIN: ${pin}`);
+      currentUrl.searchParams.set('p2p_pin', pin);
+      ui.renderQRCode(qrcodeContainer, currentUrl.toString(), 160);
     } catch (err) {
-      console.error('ホストセッション初期化失敗:', err);
-      myPinCodeEl.textContent = 'エラー';
-      ui.showToast('シグナリング待機中（厳格セキュリティ下モード利用可能）', 'info');
+      console.warn('P2Pホスト初期化失敗 (リレーモード利用可能):', err);
+      if (myPinCodeEl) myPinCodeEl.textContent = '---';
     }
   }
 
   async function checkUrlParams() {
     try {
       const params = new URLSearchParams(window.location.search);
+      const relayToken = params.get('relay_token');
       const pin = params.get('pin');
-      if (pin && pin.length === 6) {
-        targetPinInput.value = pin;
-        ui.showToast(`PIN [${pin}] を読み込みました。接続中...`, 'info');
-        executeConnect(pin);
-      } else {
-        await initHostSession();
+      const p2pPin = params.get('p2p_pin');
+
+      // 1. リレー受信パラメータがある場合
+      if (relayToken && pin) {
+        tabRelayBtn.click();
+        relayReceiveUrlInput.value = relayToken;
+        relayReceivePin.value = pin;
+        ui.showToast(`PIN [${pin}] を読み込みました。「受信・復号して保存」を押してください`, 'info');
+      }
+      // 2. P2P接続パラメータがある場合
+      else if (p2pPin && p2pPin.length === 6) {
+        tabOnlineBtn.click();
+        targetPinInput.value = p2pPin;
+        ui.showToast(`P2P PIN [${p2pPin}] を読み込みました。接続中...`, 'info');
+        executeP2PConnect(p2pPin);
+      } 
+      // 3. 通常起動時
+      else {
+        initHostSession();
       }
     } catch (e) {
-      console.error('URLチェックエラー:', e);
+      console.error('URLパラメータチェックエラー:', e);
     }
   }
 
-  // 非同期起動（UIの即時操作性を阻害しない）
+  // 初期化実行
   setTimeout(() => {
     checkUrlParams();
   }, 10);
