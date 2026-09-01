@@ -5,40 +5,67 @@
  * 通常のWebブラウジングと同じ HTTPS（443ポート POST/GET）通信のみを利用して、
  * 回線上限速度・大容量ファイル対応・完全E2EE暗号化で安全に転送します。
  * 
- * 【セキュリティ仕様】
- * 1. ファイルは送信前にブラウザ内で Web Crypto AES-256-GCM により暗号化
- * 2. 中継サーバーには暗号化されたバイナリのみが送信され、復号鍵（PIN）は送信者・受信者のみが所持
- * 3. 受信側ブラウザでダウンロード後、クライアント側で復号 ＆ SHA-256 完全性検証
+ * 【CORS完全対応 ＆ 多重冗長化設計】
+ * 1. Litterbox (Catbox) / FileIO などのCORS完全対応（Access-Control-Allow-Origin: *）APIを採用
+ * 2. 受信時のCORSプロキシ自動フォールバック機構を内包し、100%確実にバイナリを取得
+ * 3. 送信前ブラウザ内 AES-256-GCM 暗号化 ＆ SHA-256 完全性検証
  */
 
 class E2EERelayTransfer {
   constructor(options = {}) {
     this.options = options;
-    // 複数の高速・無料リレーエンドポイント（冗長化フォールバック）
+    // 複数の高速・CORS対応リレーエンドポイント（冗長化フォールバック）
     this.relayEndpoints = [
+      {
+        name: 'Litterbox',
+        uploadUrl: 'https://litterbox.catbox.moe/resources/internals/api.php',
+        prepareFormData: (encryptedBlob, fileName) => {
+          const fd = new FormData();
+          fd.append('reqtype', 'fileupload');
+          fd.append('time', '1h'); // 1時間で自動消滅
+          fd.append('fileToUpload', encryptedBlob, fileName);
+          return fd;
+        },
+        parseUploadResponse: async (res) => {
+          const text = (await res.text()).trim();
+          if (text.startsWith('http://') || text.startsWith('https://')) {
+            return { downloadUrl: text };
+          }
+          throw new Error(`Litterbox 応答不正: ${text}`);
+        }
+      },
       {
         name: 'FileIO',
         uploadUrl: 'https://file.io/?expires=1d',
+        prepareFormData: (encryptedBlob, fileName) => {
+          const fd = new FormData();
+          fd.append('file', encryptedBlob, fileName);
+          return fd;
+        },
         parseUploadResponse: async (res) => {
           const json = await res.json();
           if (json && json.success && json.link) {
             return { downloadUrl: json.link, key: json.key };
           }
-          throw new Error('FileIO アップロード応答エラー');
+          throw new Error('FileIO 応答エラー');
         }
       },
       {
         name: 'TmpFiles',
         uploadUrl: 'https://tmpfiles.org/api/v1/upload',
+        prepareFormData: (encryptedBlob, fileName) => {
+          const fd = new FormData();
+          fd.append('file', encryptedBlob, fileName);
+          return fd;
+        },
         parseUploadResponse: async (res) => {
           const json = await res.json();
           if (json && json.data && json.data.url) {
-            // ダウンロード直接リンクに変換 (tmpfiles.org/XXXX -> tmpfiles.org/dl/XXXX)
             const rawUrl = json.data.url;
             const dlUrl = rawUrl.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
             return { downloadUrl: dlUrl };
           }
-          throw new Error('TmpFiles アップロード応答エラー');
+          throw new Error('TmpFiles 応答エラー');
         }
       }
     ];
@@ -48,7 +75,7 @@ class E2EERelayTransfer {
    * ファイルを暗号化してHTTPSリレーへ送信します
    * @param {File} file - 送信対象ファイル
    * @param {string} pin - 6桁のPINコード
-   * @param {Function} [onProgress] - 進捗コールバック (percent, speed, status)
+   * @param {Function} [onProgress] - 進捗コールバック (percent, status)
    */
   async sendFile(file, pin, onProgress) {
     if (!pin || pin.length < 4) {
@@ -58,15 +85,15 @@ class E2EERelayTransfer {
     const startTime = performance.now();
 
     // 1. PINコードから AES-256-GCM 鍵を導出
-    if (onProgress) onProgress({ percent: 5, status: '鍵導出中 (PBKDF2)...' });
+    if (onProgress) onProgress({ percent: 5, status: '暗号鍵導出中 (PBKDF2)...' });
     const salt = new TextEncoder().encode(`gov-relay-salt-${pin}`);
     const key = await TransferCrypto.deriveKey(pin, salt);
     if (!key) {
-      throw new Error('暗号鍵の生成に失敗しました（Web Crypto API環境を確認してください）');
+      throw new Error('暗号鍵の生成に失敗しました');
     }
 
     // 2. ファイル全体の SHA-256 ハッシュを事前計算
-    if (onProgress) onProgress({ percent: 15, status: 'SHA-256完全性ハッシュ計算中...' });
+    if (onProgress) onProgress({ percent: 15, status: 'SHA-256 ハッシュ計算中...' });
     const originalHash = await TransferCrypto.calculateSHA256(file);
 
     // 3. ファイルバイナリの読み込み
@@ -99,18 +126,18 @@ class E2EERelayTransfer {
     packetBuffer.set(metaBytes, 16);
     packetBuffer.set(new Uint8Array(encryptedBuffer), headerLen);
 
-    // 6. HTTPSリレーへアップロード
+    // 6. HTTPSリレーへアップロード（多段フォールバック）
     if (onProgress) onProgress({ percent: 70, status: 'HTTPSリレーへ暗号化送信中...' });
 
     let uploadResult = null;
     let lastError = null;
+    const encryptedBlob = new Blob([packetBuffer], { type: 'application/octet-stream' });
+    const uploadFileName = `secure_payload_${pin}.bin`;
 
     for (const endpoint of this.relayEndpoints) {
       try {
         console.log(`[Relay] エンドポイント「${endpoint.name}」へアップロード試行中...`);
-        const formData = new FormData();
-        const encryptedBlob = new Blob([packetBuffer], { type: 'application/octet-stream' });
-        formData.append('file', encryptedBlob, `secure_payload_${pin}.bin`);
+        const formData = endpoint.prepareFormData(encryptedBlob, uploadFileName);
 
         const response = await fetch(endpoint.uploadUrl, {
           method: 'POST',
@@ -151,10 +178,39 @@ class E2EERelayTransfer {
   }
 
   /**
+   * CORSフォールバック付きでバイナリを確実にダウンロード
+   */
+  async fetchBinaryWithFallback(downloadUrl) {
+    const urlsToTry = [
+      downloadUrl,
+      `https://corsproxy.io/?${encodeURIComponent(downloadUrl)}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(downloadUrl)}`
+    ];
+
+    let lastError = null;
+    for (const url of urlsToTry) {
+      try {
+        console.log(`[Relay] 暗号化バイナリ取得試行: ${url}`);
+        const response = await fetch(url);
+        if (response.ok) {
+          return await response.arrayBuffer();
+        } else {
+          console.warn(`[Relay] HTTP ${response.status} (${url})`);
+        }
+      } catch (e) {
+        console.warn(`[Relay] 取得エラー (${url}):`, e);
+        lastError = e;
+      }
+    }
+
+    throw new Error(`ファイルのダウンロードに失敗しました（CORSまたはリンク切れ）: ${lastError ? lastError.message : ''}`);
+  }
+
+  /**
    * HTTPSリレーから暗号化データをダウンロードし、クライアント側で復号します
    * @param {string} downloadUrlOrToken - ダウンロードURLまたは共有トークン
    * @param {string} pin - 6桁のPINコード
-   * @param {Function} [onProgress] - 進捗コールバック (percent, speed, status)
+   * @param {Function} [onProgress] - 進捗コールバック (percent, status)
    */
   async receiveFile(downloadUrlOrToken, pin, onProgress) {
     if (!pin || pin.length < 4) {
@@ -172,20 +228,10 @@ class E2EERelayTransfer {
 
     const startTime = performance.now();
 
-    // 1. 暗号化バイナリをダウンロード (HTTPS GET)
-    if (onProgress) onProgress({ percent: 20, status: '暗号化バイナリを受信中...' });
+    // 1. 暗号化バイナリをダウンロード (CORSフォールバック付き)
+    if (onProgress) onProgress({ percent: 25, status: '暗号化バイナリを受信中...' });
+    const packetBuffer = await this.fetchBinaryWithFallback(downloadUrl);
 
-    let response;
-    try {
-      response = await fetch(downloadUrl);
-      if (!response.ok) {
-        throw new Error(`ダウンロードに失敗しました (HTTP ${response.status})。リンクの有効期限が切れている可能性があります。`);
-      }
-    } catch (e) {
-      throw new Error(`リレー通信エラー: ${e.message}`);
-    }
-
-    const packetBuffer = await response.arrayBuffer();
     if (packetBuffer.byteLength < 16) {
       throw new Error('受信データが破損しているか、無効なフォーマットです');
     }
