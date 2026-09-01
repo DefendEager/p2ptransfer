@@ -4,7 +4,7 @@
  * イベントハンドリング、ファイルドラッグ＆ドロップ、複数送信キュー等を制御します。
  */
 
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
   // 1. UIマネージャー初期化
   const ui = new UIManager();
 
@@ -179,43 +179,173 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sendTextBtn = document.getElementById('sendTextBtn');
 
   // ========================================================================
-  // 初期化＆ホストセッション開始
+  // イベントリスナーの即時登録（非同期処理の成否に依存させない最優先登録）
   // ========================================================================
-  async function initHostSession() {
-    try {
-      const { pin } = await signaling.hostSession();
-      myPinCodeEl.textContent = pin;
-      
-      // QRコードの生成（URLクエリパラメータ付き）
-      const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.set('pin', pin);
-      ui.renderQRCode(qrcodeContainer, currentUrl.toString());
-      console.log(`[App] ホストセッション開始 PIN: ${pin}, URL: ${currentUrl.toString()}`);
-    } catch (err) {
-      console.error('ホストセッション初期化失敗:', err);
-      myPinCodeEl.textContent = 'エラー';
-      ui.showToast('シグナリング待機中（厳格セキュリティ下モード利用可能）', 'info');
-    }
+
+  // 1. 接続タブ切替 (オンライン / オフライン / 厳格セキュリティ下)
+  if (tabOnlineBtn) {
+    tabOnlineBtn.addEventListener('click', () => {
+      tabOnlineBtn.classList.add('active');
+      tabOfflineBtn.classList.remove('active');
+      tabStrictQrBtn.classList.remove('active');
+      onlineConnectView.classList.remove('hidden');
+      offlineConnectView.classList.add('hidden');
+      strictQrConnectView.classList.add('hidden');
+    });
   }
 
-  // URLクエリパラメータからPINをチェックして自動接続
-  async function checkUrlParams() {
-    const params = new URLSearchParams(window.location.search);
-    const pin = params.get('pin');
-    if (pin && pin.length === 6) {
-      targetPinInput.value = pin;
-      ui.showToast(`PIN [${pin}] を読み込みました。接続中...`, 'info');
-      executeConnect(pin);
-    } else {
-      await initHostSession();
-    }
+  if (tabOfflineBtn) {
+    tabOfflineBtn.addEventListener('click', () => {
+      tabOfflineBtn.classList.add('active');
+      tabOnlineBtn.classList.remove('active');
+      tabStrictQrBtn.classList.remove('active');
+      offlineConnectView.classList.remove('hidden');
+      onlineConnectView.classList.add('hidden');
+      strictQrConnectView.classList.add('hidden');
+    });
   }
 
-  await checkUrlParams();
+  if (tabStrictQrBtn) {
+    tabStrictQrBtn.addEventListener('click', () => {
+      tabStrictQrBtn.classList.add('active');
+      tabOnlineBtn.classList.remove('active');
+      tabOfflineBtn.classList.remove('active');
+      strictQrConnectView.classList.remove('hidden');
+      onlineConnectView.classList.add('hidden');
+      offlineConnectView.classList.add('hidden');
+    });
+  }
 
-  // ========================================================================
-  // 接続処理 ＆ キャンセル制御
-  // ========================================================================
+  // 2. 厳格セキュリティ下（動的QR）サブタブ切替
+  if (tabQrSendBtn) {
+    tabQrSendBtn.addEventListener('click', () => {
+      tabQrSendBtn.classList.add('active');
+      tabQrReceiveBtn.classList.remove('active');
+      qrSendPanel.classList.remove('hidden');
+      qrReceivePanel.classList.add('hidden');
+      dynamicQr.stopReceiving();
+    });
+  }
+
+  if (tabQrReceiveBtn) {
+    tabQrReceiveBtn.addEventListener('click', () => {
+      tabQrReceiveBtn.classList.add('active');
+      tabQrSendBtn.classList.remove('active');
+      qrReceivePanel.classList.remove('hidden');
+      qrSendPanel.classList.add('hidden');
+      dynamicQr.stopTransmission();
+    });
+  }
+
+  // 3. 動的QRファイル選択・送信
+  if (selectQrFileBtn && strictQrFileInput) {
+    selectQrFileBtn.addEventListener('click', () => strictQrFileInput.click());
+
+    strictQrFileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        selectedStrictFile = e.target.files[0];
+        strictQrFileName.textContent = selectedStrictFile.name;
+        strictQrFileSize.textContent = ui.formatBytes(selectedStrictFile.size);
+        strictQrFileInfo.classList.remove('hidden');
+        startQrSendBtn.disabled = false;
+      }
+    });
+  }
+
+  if (startQrSendBtn) {
+    startQrSendBtn.addEventListener('click', async () => {
+      if (!selectedStrictFile) return;
+
+      startQrSendBtn.classList.add('hidden');
+      stopQrSendBtn.classList.remove('hidden');
+      dynamicQrDisplayArea.classList.remove('hidden');
+
+      try {
+        ui.showToast('ファイルをGzip圧縮して動的QRパケットを構築中...', 'info');
+        const prep = await dynamicQr.prepareTransmission(selectedStrictFile);
+        qrFrameTotal.textContent = prep.totalChunks;
+
+        dynamicQr.startTransmission(dynamicQrContainer, (progress) => {
+          qrFrameCurrent.textContent = progress.current;
+          qrFramePercent.textContent = `${progress.percent}%`;
+        });
+        ui.showToast(`動的QR送信を開始しました (全${prep.totalChunks}コマ)`, 'info');
+      } catch (err) {
+        console.error(err);
+        ui.showToast(`動的QR送信エラー: ${err.message}`, 'error');
+        startQrSendBtn.classList.remove('hidden');
+        stopQrSendBtn.classList.add('hidden');
+      }
+    });
+  }
+
+  if (stopQrSendBtn) {
+    stopQrSendBtn.addEventListener('click', () => {
+      dynamicQr.stopTransmission();
+      startQrSendBtn.classList.remove('hidden');
+      stopQrSendBtn.classList.add('hidden');
+      dynamicQrDisplayArea.classList.add('hidden');
+      ui.showToast('動的QR送信を停止しました', 'info');
+    });
+  }
+
+  // 4. 動的QRカメラ受信
+  if (startQrReceiveBtn) {
+    startQrReceiveBtn.addEventListener('click', async () => {
+      startQrReceiveBtn.classList.add('hidden');
+      stopQrReceiveBtn.classList.remove('hidden');
+      qrScannerContainer.classList.remove('hidden');
+      strictReceiveResult.classList.add('hidden');
+
+      await dynamicQr.startReceiving(
+        strictQrVideo,
+        (progress) => {
+          strictReceiveCount.textContent = progress.received;
+          strictReceiveTotal.textContent = progress.total;
+          strictReceivePercent.textContent = `${progress.percent}%`;
+          strictReceiveProgressFill.style.width = `${progress.percent}%`;
+          strictReceiveFileName.textContent = `受信中: ${progress.fileName} (${ui.formatBytes(progress.rawSize)})`;
+        },
+        (completeData) => {
+          ui.showToast(`「${completeData.fileName}」の復元が完了しました`, 'info');
+          startQrReceiveBtn.classList.remove('hidden');
+          stopQrReceiveBtn.classList.add('hidden');
+
+          const downloadUrl = URL.createObjectURL(completeData.blob);
+          strictReceiveResult.classList.remove('hidden');
+          strictReceiveResult.innerHTML = `
+            <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-weight: 600; color: var(--text-primary); font-size: 0.88rem;">${ui.escapeHtml(completeData.fileName)}</div>
+                <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.2rem; font-family: var(--font-mono);">
+                  ${ui.formatBytes(completeData.size)} | SHA-256検証済 (${completeData.durationSeconds.toFixed(1)}秒)
+                </div>
+              </div>
+              <a href="${downloadUrl}" download="${ui.escapeHtml(completeData.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.45rem 1rem;">
+                保存
+              </a>
+            </div>
+          `;
+        },
+        (err) => {
+          ui.showToast(err.message, 'error');
+          startQrReceiveBtn.classList.remove('hidden');
+          stopQrReceiveBtn.classList.add('hidden');
+        }
+      );
+    });
+  }
+
+  if (stopQrReceiveBtn) {
+    stopQrReceiveBtn.addEventListener('click', () => {
+      dynamicQr.stopReceiving();
+      startQrReceiveBtn.classList.remove('hidden');
+      stopQrReceiveBtn.classList.add('hidden');
+      ui.showToast('スキャンを停止しました', 'info');
+    });
+  }
+
+  // 5. 接続ボタン ＆ キャンセル制御
   async function executeConnect(pin) {
     connectPinBtn.classList.add('hidden');
     cancelConnectBtn.classList.remove('hidden');
@@ -232,379 +362,202 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  connectPinBtn.addEventListener('click', () => {
-    const pin = targetPinInput.value.trim();
-    if (!pin || pin.length < 4) {
-      ui.showToast('PINコードを正しく入力してください', 'error');
-      return;
-    }
-    executeConnect(pin);
-  });
-
-  cancelConnectBtn.addEventListener('click', () => {
-    signaling.cancelSession();
-    ui.showToast('接続試行を中止しました', 'info');
-    connectPinBtn.classList.remove('hidden');
-    cancelConnectBtn.classList.add('hidden');
-    targetPinInput.disabled = false;
-  });
-
-  // ========================================================================
-  // 接続状態ハンドラ
-  // ========================================================================
-  function onConnectedState(info) {
-    connectionCard.classList.add('hidden');
-    connectedBanner.classList.remove('hidden');
-    mainWorkspace.classList.remove('hidden');
-
-    const secTag = document.getElementById('headerSecurityTag');
-    const secText = document.getElementById('securityText');
-    if (secTag && secText) {
-      secText.textContent = 'E2EE AES-256 接続中';
-    }
-
-    const peerTitle = document.getElementById('connectedPeerTitle');
-    const peerDesc = document.getElementById('connectedPeerDesc');
-    const pinStr = signaling.currentPin ? `PIN: ${signaling.currentPin}` : 'P2P Direct';
-    if (peerTitle) peerTitle.textContent = `接続中 (${pinStr})`;
-    
-    if (info && peerDesc) {
-      peerDesc.textContent = `経路: ${info.connectionType || 'P2P Direct'} | 遅延: ${info.rtt || '< 1 ms'}`;
-    }
-  }
-
-  function onDisconnectedState() {
-    connectionCard.classList.remove('hidden');
-    connectedBanner.classList.add('hidden');
-    mainWorkspace.classList.add('hidden');
-
-    const secTag = document.getElementById('headerSecurityTag');
-    const secText = document.getElementById('securityText');
-    if (secTag && secText) {
-      secText.textContent = 'E2EE 256bit 待機中';
-    }
-  }
-
-  function updateLiveStats(stats) {
-    const statsEl = document.getElementById('statsContent');
-    if (!statsEl) return;
-    statsEl.innerHTML = `
-      状態: ${stats.dataChannelState === 'open' ? '通信可能' : stats.dataChannelState}<br>
-      経路: ${stats.connectionType}<br>
-      遅延: ${stats.rtt}<br>
-      暗号化: Web Crypto AES-256-GCM + DTLS (TURN over TLS対応)
-    `;
-  }
-
-  // ========================================================================
-  // イベントリスナー
-  // ========================================================================
-
-  // セキュリティ仕様モーダル
-  if (securityInfoBtn) securityInfoBtn.addEventListener('click', () => securityModal.classList.add('open'));
-  if (networkStatsBtn) networkStatsBtn.addEventListener('click', () => securityModal.classList.add('open'));
-  if (closeSecurityModalBtn) closeSecurityModalBtn.addEventListener('click', () => securityModal.classList.remove('open'));
-
-  // PINコピー・再生成
-  copyPinBtn.addEventListener('click', async () => {
-    const pin = myPinCodeEl.textContent;
-    if (pin && pin !== '------' && pin !== 'エラー') {
-      await navigator.clipboard.writeText(pin);
-      ui.showToast(`PINコード (${pin}) をコピーしました`, 'info');
-    }
-  });
-
-  refreshPinBtn.addEventListener('click', async () => {
-    await initHostSession();
-    ui.showToast('新しいPINコードを生成しました', 'info');
-  });
-
-  // QRコードスキャナー起動
-  openScannerBtn.addEventListener('click', () => {
-    ui.startQRScanner(async (data) => {
-      let pinToUse = data;
-      try {
-        const url = new URL(data);
-        const pinFromUrl = url.searchParams.get('pin');
-        if (pinFromUrl) pinToUse = pinFromUrl;
-      } catch (e) {}
-
-      targetPinInput.value = pinToUse;
-      ui.showToast(`PIN [${pinToUse}] を読み取りました。接続中...`, 'info');
-      executeConnect(pinToUse);
-    });
-  });
-
-  stopScannerBtn.addEventListener('click', () => ui.stopQRScanner());
-  closeScannerModalBtn.addEventListener('click', () => ui.stopQRScanner());
-
-  // 切断ボタン
-  disconnectBtn.addEventListener('click', () => {
-    if (confirm('接続を切断しますか？')) {
-      engine.close();
-      signaling.destroy();
-      onDisconnectedState();
-      initHostSession();
-      ui.showToast('接続を切断しました', 'info');
-    }
-  });
-
-  // 接続タブ切替 (オンライン / オフライン / 厳格セキュリティ下)
-  tabOnlineBtn.addEventListener('click', () => {
-    tabOnlineBtn.classList.add('active');
-    tabOfflineBtn.classList.remove('active');
-    tabStrictQrBtn.classList.remove('active');
-    onlineConnectView.classList.remove('hidden');
-    offlineConnectView.classList.add('hidden');
-    strictQrConnectView.classList.add('hidden');
-  });
-
-  tabOfflineBtn.addEventListener('click', () => {
-    tabOfflineBtn.classList.add('active');
-    tabOnlineBtn.classList.remove('active');
-    tabStrictQrBtn.classList.remove('active');
-    offlineConnectView.classList.remove('hidden');
-    onlineConnectView.classList.add('hidden');
-    strictQrConnectView.classList.add('hidden');
-  });
-
-  tabStrictQrBtn.addEventListener('click', () => {
-    tabStrictQrBtn.classList.add('active');
-    tabOnlineBtn.classList.remove('active');
-    tabOfflineBtn.classList.remove('active');
-    strictQrConnectView.classList.remove('hidden');
-    onlineConnectView.classList.add('hidden');
-    offlineConnectView.classList.add('hidden');
-  });
-
-  // オフラインシグナリング
-  generateOfferBtn.addEventListener('click', async () => {
-    generateOfferBtn.disabled = true;
-    generateOfferBtn.textContent = '生成中...';
-    try {
-      const offerBase64 = await signaling.createOfflineOffer();
-      offerTextarea.value = offerBase64;
-      offerOutputGroup.classList.remove('hidden');
-      ui.showToast('オファーSDPを生成しました', 'info');
-    } catch (e) {
-      ui.showToast(`オファー生成失敗: ${e.message}`, 'error');
-    } finally {
-      generateOfferBtn.disabled = false;
-      generateOfferBtn.textContent = 'オファーSDPを生成';
-    }
-  });
-
-  copyOfferBtn.addEventListener('click', async () => {
-    if (offerTextarea.value) {
-      await navigator.clipboard.writeText(offerTextarea.value);
-      ui.showToast('オファーSDPをコピーしました', 'info');
-    }
-  });
-
-  generateAnswerBtn.addEventListener('click', async () => {
-    const offerStr = inputOfferTextarea.value.trim();
-    if (!offerStr) {
-      ui.showToast('オファーSDPを入力してください', 'error');
-      return;
-    }
-    generateAnswerBtn.disabled = true;
-    generateAnswerBtn.textContent = '生成中...';
-    try {
-      const answerBase64 = await signaling.createOfflineAnswer(offerStr);
-      answerTextarea.value = answerBase64;
-      answerOutputGroup.classList.remove('hidden');
-      ui.showToast('アンサーSDPを生成しました', 'info');
-    } catch (e) {
-      ui.showToast(`アンサー生成失敗: ${e.message}`, 'error');
-    } finally {
-      generateAnswerBtn.disabled = false;
-      generateAnswerBtn.textContent = 'アンサーSDPを生成';
-    }
-  });
-
-  copyAnswerBtn.addEventListener('click', async () => {
-    if (answerTextarea.value) {
-      await navigator.clipboard.writeText(answerTextarea.value);
-      ui.showToast('アンサーSDPをコピーしました', 'info');
-    }
-  });
-
-  applyAnswerBtn.addEventListener('click', async () => {
-    const answerStr = applyAnswerInput.value.trim();
-    if (!answerStr) {
-      ui.showToast('アンサーSDPを入力してください', 'error');
-      return;
-    }
-    try {
-      await signaling.applyOfflineAnswer(answerStr);
-      ui.showToast('アンサーを適用しました。接続待機中...', 'info');
-    } catch (e) {
-      ui.showToast(`アンサー適用失敗: ${e.message}`, 'error');
-    }
-  });
-
-  // ========================================================================
-  // 厳格セキュリティ下モード（動的QR光転送）制御
-  // ========================================================================
-  tabQrSendBtn.addEventListener('click', () => {
-    tabQrSendBtn.classList.add('active');
-    tabQrReceiveBtn.classList.remove('active');
-    qrSendPanel.classList.remove('hidden');
-    qrReceivePanel.classList.add('hidden');
-    dynamicQr.stopReceiving();
-  });
-
-  tabQrReceiveBtn.addEventListener('click', () => {
-    tabQrReceiveBtn.classList.add('active');
-    tabQrSendBtn.classList.remove('active');
-    qrReceivePanel.classList.remove('hidden');
-    qrSendPanel.classList.add('hidden');
-    dynamicQr.stopTransmission();
-  });
-
-  selectQrFileBtn.addEventListener('click', () => strictQrFileInput.click());
-
-  strictQrFileInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      selectedStrictFile = e.target.files[0];
-      strictQrFileName.textContent = selectedStrictFile.name;
-      strictQrFileSize.textContent = ui.formatBytes(selectedStrictFile.size);
-      strictQrFileInfo.classList.remove('hidden');
-      startQrSendBtn.disabled = false;
-    }
-  });
-
-  startQrSendBtn.addEventListener('click', async () => {
-    if (!selectedStrictFile) return;
-
-    startQrSendBtn.classList.add('hidden');
-    stopQrSendBtn.classList.remove('hidden');
-    dynamicQrDisplayArea.classList.remove('hidden');
-
-    try {
-      ui.showToast('ファイルをGzip圧縮して動的QRパケットを構築中...', 'info');
-      const prep = await dynamicQr.prepareTransmission(selectedStrictFile);
-      qrFrameTotal.textContent = prep.totalChunks;
-
-      dynamicQr.startTransmission(dynamicQrContainer, (progress) => {
-        qrFrameCurrent.textContent = progress.current;
-        qrFramePercent.textContent = `${progress.percent}%`;
-      });
-      ui.showToast(`動的QR送信を開始しました (全${prep.totalChunks}コマ)`, 'info');
-    } catch (err) {
-      console.error(err);
-      ui.showToast(`動的QR送信エラー: ${err.message}`, 'error');
-      startQrSendBtn.classList.remove('hidden');
-      stopQrSendBtn.classList.add('hidden');
-    }
-  });
-
-  stopQrSendBtn.addEventListener('click', () => {
-    dynamicQr.stopTransmission();
-    startQrSendBtn.classList.remove('hidden');
-    stopQrSendBtn.classList.add('hidden');
-    dynamicQrDisplayArea.classList.add('hidden');
-    ui.showToast('動的QR送信を停止しました', 'info');
-  });
-
-  // 動的QR受信
-  startQrReceiveBtn.addEventListener('click', async () => {
-    startQrReceiveBtn.classList.add('hidden');
-    stopQrReceiveBtn.classList.remove('hidden');
-    qrScannerContainer.classList.remove('hidden');
-    strictReceiveResult.classList.add('hidden');
-
-    await dynamicQr.startReceiving(
-      strictQrVideo,
-      (progress) => {
-        strictReceiveCount.textContent = progress.received;
-        strictReceiveTotal.textContent = progress.total;
-        strictReceivePercent.textContent = `${progress.percent}%`;
-        strictReceiveProgressFill.style.width = `${progress.percent}%`;
-        strictReceiveFileName.textContent = `受信中: ${progress.fileName} (${ui.formatBytes(progress.rawSize)})`;
-      },
-      (completeData) => {
-        ui.showToast(`「${completeData.fileName}」の復元が完了しました`, 'info');
-        startQrReceiveBtn.classList.remove('hidden');
-        stopQrReceiveBtn.classList.add('hidden');
-
-        // 結果ダウンロードボタン描画
-        const downloadUrl = URL.createObjectURL(completeData.blob);
-        strictReceiveResult.classList.remove('hidden');
-        strictReceiveResult.innerHTML = `
-          <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <div style="font-weight: 600; color: var(--text-primary); font-size: 0.88rem;">${ui.escapeHtml(completeData.fileName)}</div>
-              <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.2rem; font-family: var(--font-mono);">
-                ${ui.formatBytes(completeData.size)} | SHA-256検証済 (${completeData.durationSeconds.toFixed(1)}秒)
-              </div>
-            </div>
-            <a href="${downloadUrl}" download="${ui.escapeHtml(completeData.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.45rem 1rem;">
-              保存
-            </a>
-          </div>
-        `;
-      },
-      (err) => {
-        ui.showToast(err.message, 'error');
-        startQrReceiveBtn.classList.remove('hidden');
-        stopQrReceiveBtn.classList.add('hidden');
+  if (connectPinBtn) {
+    connectPinBtn.addEventListener('click', () => {
+      const pin = targetPinInput.value.trim();
+      if (!pin || pin.length < 4) {
+        ui.showToast('PINコードを正しく入力してください', 'error');
+        return;
       }
-    );
-  });
+      executeConnect(pin);
+    });
+  }
 
-  stopQrReceiveBtn.addEventListener('click', () => {
-    dynamicQr.stopReceiving();
-    startQrReceiveBtn.classList.remove('hidden');
-    stopQrReceiveBtn.classList.add('hidden');
-    ui.showToast('スキャンを停止しました', 'info');
-  });
+  if (cancelConnectBtn) {
+    cancelConnectBtn.addEventListener('click', () => {
+      signaling.cancelSession();
+      ui.showToast('接続試行を中止しました', 'info');
+      connectPinBtn.classList.remove('hidden');
+      cancelConnectBtn.classList.add('hidden');
+      targetPinInput.disabled = false;
+    });
+  }
 
-  // ========================================================================
-  // 作業タブ切替 (ファイル共有 / テキスト共有)
-  // ========================================================================
-  tabFilesBtn.addEventListener('click', () => {
-    tabFilesBtn.classList.add('active');
-    tabTextBtn.classList.remove('active');
-    filesView.classList.remove('hidden');
-    textView.classList.add('hidden');
-  });
+  // 6. QRコードスキャナーモーダル
+  if (openScannerBtn) {
+    openScannerBtn.addEventListener('click', () => {
+      ui.startQRScanner(async (data) => {
+        let pinToUse = data;
+        try {
+          const url = new URL(data);
+          const pinFromUrl = url.searchParams.get('pin');
+          if (pinFromUrl) pinToUse = pinFromUrl;
+        } catch (e) {}
 
-  tabTextBtn.addEventListener('click', () => {
-    tabTextBtn.classList.add('active');
-    tabFilesBtn.classList.remove('active');
-    textView.classList.remove('hidden');
-    filesView.classList.add('hidden');
-  });
+        targetPinInput.value = pinToUse;
+        ui.showToast(`PIN [${pinToUse}] を読み取りました。接続中...`, 'info');
+        executeConnect(pinToUse);
+      });
+    });
+  }
 
-  // ========================================================================
-  // ファイルドラッグ＆ドロップ ＆ 複数ファイル選択
-  // ========================================================================
-  dropzone.addEventListener('click', () => fileInput.click());
+  if (stopScannerBtn) stopScannerBtn.addEventListener('click', () => ui.stopQRScanner());
+  if (closeScannerModalBtn) closeScannerModalBtn.addEventListener('click', () => ui.stopQRScanner());
 
-  dropzone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropzone.classList.add('drag-over');
-  });
+  // 7. PINコピー・再生成
+  if (copyPinBtn) {
+    copyPinBtn.addEventListener('click', async () => {
+      const pin = myPinCodeEl.textContent;
+      if (pin && pin !== '------' && pin !== 'エラー') {
+        await navigator.clipboard.writeText(pin);
+        ui.showToast(`PINコード (${pin}) をコピーしました`, 'info');
+      }
+    });
+  }
 
-  dropzone.addEventListener('dragleave', () => {
-    dropzone.classList.remove('drag-over');
-  });
+  if (refreshPinBtn) {
+    refreshPinBtn.addEventListener('click', async () => {
+      await initHostSession();
+      ui.showToast('新しいPINコードを生成しました', 'info');
+    });
+  }
 
-  dropzone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropzone.classList.remove('drag-over');
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      addFilesToStage(Array.from(e.dataTransfer.files));
-    }
-  });
+  // 8. 切断ボタン
+  if (disconnectBtn) {
+    disconnectBtn.addEventListener('click', () => {
+      if (confirm('接続を切断しますか？')) {
+        engine.close();
+        signaling.destroy();
+        onDisconnectedState();
+        initHostSession();
+        ui.showToast('接続を切断しました', 'info');
+      }
+    });
+  }
 
-  fileInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      addFilesToStage(Array.from(e.target.files));
-      fileInput.value = '';
-    }
-  });
+  // 9. オフライン手動SDP
+  if (generateOfferBtn) {
+    generateOfferBtn.addEventListener('click', async () => {
+      generateOfferBtn.disabled = true;
+      generateOfferBtn.textContent = '生成中...';
+      try {
+        const offerBase64 = await signaling.createOfflineOffer();
+        offerTextarea.value = offerBase64;
+        offerOutputGroup.classList.remove('hidden');
+        ui.showToast('オファーSDPを生成しました', 'info');
+      } catch (e) {
+        ui.showToast(`オファー生成失敗: ${e.message}`, 'error');
+      } finally {
+        generateOfferBtn.disabled = false;
+        generateOfferBtn.textContent = 'オファーSDPを生成';
+      }
+    });
+  }
+
+  if (copyOfferBtn) {
+    copyOfferBtn.addEventListener('click', async () => {
+      if (offerTextarea.value) {
+        await navigator.clipboard.writeText(offerTextarea.value);
+        ui.showToast('オファーSDPをコピーしました', 'info');
+      }
+    });
+  }
+
+  if (generateAnswerBtn) {
+    generateAnswerBtn.addEventListener('click', async () => {
+      const offerStr = inputOfferTextarea.value.trim();
+      if (!offerStr) {
+        ui.showToast('オファーSDPを入力してください', 'error');
+        return;
+      }
+      generateAnswerBtn.disabled = true;
+      generateAnswerBtn.textContent = '生成中...';
+      try {
+        const answerBase64 = await signaling.createOfflineAnswer(offerStr);
+        answerTextarea.value = answerBase64;
+        answerOutputGroup.classList.remove('hidden');
+        ui.showToast('アンサーSDPを生成しました', 'info');
+      } catch (e) {
+        ui.showToast(`アンサー生成失敗: ${e.message}`, 'error');
+      } finally {
+        generateAnswerBtn.disabled = false;
+        generateAnswerBtn.textContent = 'アンサーSDPを生成';
+      }
+    });
+  }
+
+  if (copyAnswerBtn) {
+    copyAnswerBtn.addEventListener('click', async () => {
+      if (answerTextarea.value) {
+        await navigator.clipboard.writeText(answerTextarea.value);
+        ui.showToast('アンサーSDPをコピーしました', 'info');
+      }
+    });
+  }
+
+  if (applyAnswerBtn) {
+    applyAnswerBtn.addEventListener('click', async () => {
+      const answerStr = applyAnswerInput.value.trim();
+      if (!answerStr) {
+        ui.showToast('アンサーSDPを入力してください', 'error');
+        return;
+      }
+      try {
+        await signaling.applyOfflineAnswer(answerStr);
+        ui.showToast('アンサーを適用しました。接続待機中...', 'info');
+      } catch (e) {
+        ui.showToast(`アンサー適用失敗: ${e.message}`, 'error');
+      }
+    });
+  }
+
+  // 10. メイン作業エリアタブ (ファイル / テキスト)
+  if (tabFilesBtn) {
+    tabFilesBtn.addEventListener('click', () => {
+      tabFilesBtn.classList.add('active');
+      tabTextBtn.classList.remove('active');
+      filesView.classList.remove('hidden');
+      textView.classList.add('hidden');
+    });
+  }
+
+  if (tabTextBtn) {
+    tabTextBtn.addEventListener('click', () => {
+      tabTextBtn.classList.add('active');
+      tabFilesBtn.classList.remove('active');
+      textView.classList.remove('hidden');
+      filesView.classList.add('hidden');
+    });
+  }
+
+  // 11. ファイルドラッグ＆ドロップ
+  if (dropzone && fileInput) {
+    dropzone.addEventListener('click', () => fileInput.click());
+
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('drag-over');
+    });
+
+    dropzone.addEventListener('dragleave', () => {
+      dropzone.classList.remove('drag-over');
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag-over');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        addFilesToStage(Array.from(e.dataTransfer.files));
+      }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        addFilesToStage(Array.from(e.target.files));
+        fileInput.value = '';
+      }
+    });
+  }
 
   function addFilesToStage(files) {
     stagedFiles.push(...files);
@@ -649,68 +602,69 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  clearStagedBtn.addEventListener('click', () => {
-    stagedFiles = [];
-    renderStagedFiles();
-  });
+  if (clearStagedBtn) {
+    clearStagedBtn.addEventListener('click', () => {
+      stagedFiles = [];
+      renderStagedFiles();
+    });
+  }
 
-  // ========================================================================
-  // 高速ファイル送信キュー制御
-  // ========================================================================
-  startSendFilesBtn.addEventListener('click', async () => {
-    if (isTransferring || stagedFiles.length === 0) return;
+  // 12. ファイル送信実行
+  if (startSendFilesBtn) {
+    startSendFilesBtn.addEventListener('click', async () => {
+      if (isTransferring || stagedFiles.length === 0) return;
 
-    isTransferring = true;
-    startSendFilesBtn.disabled = true;
-    const filesToSend = [...stagedFiles];
+      isTransferring = true;
+      startSendFilesBtn.disabled = true;
+      const filesToSend = [...stagedFiles];
 
-    for (let i = 0; i < filesToSend.length; i++) {
-      const file = filesToSend[i];
-      try {
-        ui.showToast(`[${i+1}/${filesToSend.length}] 「${file.name}」の送信を開始`, 'info');
-        const result = await engine.sendFile(file);
+      for (let i = 0; i < filesToSend.length; i++) {
+        const file = filesToSend[i];
+        try {
+          ui.showToast(`[${i+1}/${filesToSend.length}] 「${file.name}」の送信を開始`, 'info');
+          const result = await engine.sendFile(file);
 
-        ui.addHistoryItem({
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          sha256: result.sha256,
-          hashMatch: true,
-          durationSeconds: result.durationSeconds,
-          direction: 'send'
-        });
+          ui.addHistoryItem({
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            sha256: result.sha256,
+            hashMatch: true,
+            durationSeconds: result.durationSeconds,
+            direction: 'send'
+          });
 
-        ui.showToast(`「${file.name}」の送信が完了しました`, 'info');
-      } catch (err) {
-        console.error('ファイル送信エラー:', err);
-        ui.showToast(`「${file.name}」の送信に失敗しました: ${err.message}`, 'error');
-        break;
+          ui.showToast(`「${file.name}」の送信が完了しました`, 'info');
+        } catch (err) {
+          console.error('ファイル送信エラー:', err);
+          ui.showToast(`「${file.name}」の送信に失敗しました: ${err.message}`, 'error');
+          break;
+        }
       }
-    }
 
-    stagedFiles = [];
-    renderStagedFiles();
-    isTransferring = false;
-    startSendFilesBtn.disabled = false;
-    setTimeout(() => ui.hideTransferMonitor(), 3000);
-  });
+      stagedFiles = [];
+      renderStagedFiles();
+      isTransferring = false;
+      startSendFilesBtn.disabled = false;
+      setTimeout(() => ui.hideTransferMonitor(), 3000);
+    });
+  }
 
-  // 履歴クリア
-  clearHistoryBtn.addEventListener('click', () => {
-    const list = document.getElementById('historyList');
-    if (list) {
-      list.innerHTML = `
-        <p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">
-          転送履歴はありません
-        </p>
-      `;
-      ui.showToast('履歴を消去しました', 'info');
-    }
-  });
+  if (clearHistoryBtn) {
+    clearHistoryBtn.addEventListener('click', () => {
+      const list = document.getElementById('historyList');
+      if (list) {
+        list.innerHTML = `
+          <p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">
+            転送履歴はありません
+          </p>
+        `;
+        ui.showToast('履歴を消去しました', 'info');
+      }
+    });
+  }
 
-  // ========================================================================
-  // テキストメッセージ送信
-  // ========================================================================
+  // 13. テキスト送信
   async function handleSendTextMessage() {
     const text = textMessageInput.value.trim();
     if (!text) return;
@@ -729,13 +683,107 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  sendTextBtn.addEventListener('click', handleSendTextMessage);
+  if (sendTextBtn) sendTextBtn.addEventListener('click', handleSendTextMessage);
 
-  textMessageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendTextMessage();
+  if (textMessageInput) {
+    textMessageInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSendTextMessage();
+      }
+    });
+  }
+
+  // 14. モーダル
+  if (securityInfoBtn) securityInfoBtn.addEventListener('click', () => securityModal.classList.add('open'));
+  if (networkStatsBtn) networkStatsBtn.addEventListener('click', () => securityModal.classList.add('open'));
+  if (closeSecurityModalBtn) closeSecurityModalBtn.addEventListener('click', () => securityModal.classList.remove('open'));
+
+  // ========================================================================
+  // 接続状態ハンドラ関数
+  // ========================================================================
+  function onConnectedState(info) {
+    connectionCard.classList.add('hidden');
+    connectedBanner.classList.remove('hidden');
+    mainWorkspace.classList.remove('hidden');
+
+    const secTag = document.getElementById('headerSecurityTag');
+    const secText = document.getElementById('securityText');
+    if (secTag && secText) {
+      secText.textContent = 'E2EE AES-256 接続中';
     }
-  });
+
+    const peerTitle = document.getElementById('connectedPeerTitle');
+    const peerDesc = document.getElementById('connectedPeerDesc');
+    const pinStr = signaling.currentPin ? `PIN: ${signaling.currentPin}` : 'P2P Direct';
+    if (peerTitle) peerTitle.textContent = `接続中 (${pinStr})`;
+    
+    if (info && peerDesc) {
+      peerDesc.textContent = `経路: ${info.connectionType || 'P2P Direct'} | 遅延: ${info.rtt || '< 1 ms'}`;
+    }
+  }
+
+  function onDisconnectedState() {
+    connectionCard.classList.remove('hidden');
+    connectedBanner.classList.add('hidden');
+    mainWorkspace.classList.add('hidden');
+
+    const secTag = document.getElementById('headerSecurityTag');
+    const secText = document.getElementById('securityText');
+    if (secTag && secText) {
+      secText.textContent = 'E2EE 256bit 待機中';
+    }
+  }
+
+  function updateLiveStats(stats) {
+    const statsEl = document.getElementById('statsContent');
+    if (!statsEl) return;
+    statsEl.innerHTML = `
+      状態: ${stats.dataChannelState === 'open' ? '通信可能' : stats.dataChannelState}<br>
+      経路: ${stats.connectionType}<br>
+      遅延: ${stats.rtt}<br>
+      暗号化: Web Crypto AES-256-GCM + DTLS
+    `;
+  }
+
+  // ========================================================================
+  // 初期化＆ホストセッション（全イベント登録後に安全に非同期実行）
+  // ========================================================================
+  async function initHostSession() {
+    try {
+      const { pin } = await signaling.hostSession();
+      myPinCodeEl.textContent = pin;
+      
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set('pin', pin);
+      ui.renderQRCode(qrcodeContainer, currentUrl.toString());
+      console.log(`[App] ホストセッション開始 PIN: ${pin}`);
+    } catch (err) {
+      console.error('ホストセッション初期化失敗:', err);
+      myPinCodeEl.textContent = 'エラー';
+      ui.showToast('シグナリング待機中（厳格セキュリティ下モード利用可能）', 'info');
+    }
+  }
+
+  async function checkUrlParams() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const pin = params.get('pin');
+      if (pin && pin.length === 6) {
+        targetPinInput.value = pin;
+        ui.showToast(`PIN [${pin}] を読み込みました。接続中...`, 'info');
+        executeConnect(pin);
+      } else {
+        await initHostSession();
+      }
+    } catch (e) {
+      console.error('URLチェックエラー:', e);
+    }
+  }
+
+  // 非同期起動（UIの即時操作性を阻害しない）
+  setTimeout(() => {
+    checkUrlParams();
+  }, 10);
 
 });
