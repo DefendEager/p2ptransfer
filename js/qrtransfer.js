@@ -2,14 +2,15 @@
  * 厳格セキュリティ下モード：超高速動的QRコード光転送エンジン
  * 
  * ネットワーク通信（Wi-Fi, 4G, 外部サーバー, プロキシ）を1バイトも使わず、
- * 画面の高速アニメーションQRコード ➔ カメラ連写スキャンによる光通信で
+ * 画面の動的QRコード ➔ カメラ連写スキャンによる光通信で
  * ファイルおよびテキストを安全・確実に転送します。
  * 
- * 【最適化技術】
- * 1. Web標準 CompressionStream('gzip') によるリアルタイムデータ圧縮
- * 2. 高密度チャンキング（1コマ 600〜800バイト）と可変フレームレート（10〜20fps）
- * 3. パケットヘッダーによるフレーム順不同・重複受信耐性
- * 4. SHA-256 完全性自動検証
+ * 【低画質PCカメラ・ボケ対応の最適化】
+ * 1. 超低密度モード（1コマ120〜200文字）: ドットを巨大化し、480p固定焦点カメラでも一瞬で認識
+ * 2. コマ送り速度（FPS: 3〜15fps）の可変調整
+ * 3. スキャン画像前処理（コントラスト補正・二値化支援）による認識率向上
+ * 4. Web標準 CompressionStream('gzip') によるリアルタイムデータ圧縮
+ * 5. SHA-256 完全性自動検証
  */
 
 class DynamicQRTransfer {
@@ -23,44 +24,55 @@ class DynamicQRTransfer {
     // 送信データ状態
     this.sendChunks = [];
     this.sendIndex = 0;
-    this.fps = options.fps || 12; // 1秒あたりのコマ数
+    this.fps = options.fps || 8; // デフォルトは認識しやすい8fps
+    this.densityMode = options.densityMode || 'low'; // low(低画質カメラ用), medium(標準), high(高解像度用)
 
     // 受信データ状態
     this.receiveSession = null;
   }
 
+  setFps(fps) {
+    this.fps = Math.max(2, Math.min(20, fps));
+  }
+
+  setDensityMode(mode) {
+    this.densityMode = mode;
+  }
+
   /**
    * データをGzip圧縮します
-   * @param {Uint8Array} rawBytes
-   * @returns {Promise<Uint8Array>}
    */
   async compress(rawBytes) {
     if (typeof CompressionStream !== 'undefined') {
-      const stream = new Response(rawBytes).body.pipeThrough(new CompressionStream('gzip'));
-      const compressedBuffer = await new Response(stream).arrayBuffer();
-      return new Uint8Array(compressedBuffer);
+      try {
+        const stream = new Response(rawBytes).body.pipeThrough(new CompressionStream('gzip'));
+        const compressedBuffer = await new Response(stream).arrayBuffer();
+        return new Uint8Array(compressedBuffer);
+      } catch (e) {
+        console.warn('Gzip圧縮フォールバック:', e);
+      }
     }
     return rawBytes;
   }
 
   /**
    * Gzip圧縮データを解凍します
-   * @param {Uint8Array} compressedBytes
-   * @returns {Promise<Uint8Array>}
    */
   async decompress(compressedBytes) {
     if (typeof DecompressionStream !== 'undefined') {
-      const stream = new Response(compressedBytes).body.pipeThrough(new DecompressionStream('gzip'));
-      const decompressedBuffer = await new Response(stream).arrayBuffer();
-      return new Uint8Array(decompressedBuffer);
+      try {
+        const stream = new Response(compressedBytes).body.pipeThrough(new DecompressionStream('gzip'));
+        const decompressedBuffer = await new Response(stream).arrayBuffer();
+        return new Uint8Array(decompressedBuffer);
+      } catch (e) {
+        console.warn('Gzip解凍フォールバック:', e);
+      }
     }
     return compressedBytes;
   }
 
   /**
    * ファイルまたはテキストから動的QR送信パケット群を生成します
-   * @param {File|string} input - 送信対象ファイルまたはテキスト
-   * @param {Object} [meta] - ファイル名やタイプ
    */
   async prepareTransmission(input, meta = {}) {
     let rawBytes;
@@ -92,17 +104,20 @@ class DynamicQRTransfer {
     }
     const base64Data = btoa(binaryStr);
 
-    // 4. チャンク分割（1コマ約650文字）
-    const CHUNK_CHAR_SIZE = 650;
-    const totalChunks = Math.ceil(base64Data.length / CHUNK_CHAR_SIZE) || 1;
-    const sessionId = Math.random().toString(36).substring(2, 8);
+    // 4. 密度モードに応じたチャンクサイズ決定（低画質カメラ用は1コマ約160文字に極小化）
+    let chunkSize = 160; // low: ドットが超巨大になり、低画質PCカメラでも確実に認識可能
+    if (this.densityMode === 'medium') chunkSize = 350;
+    if (this.densityMode === 'high') chunkSize = 650;
+
+    const totalChunks = Math.ceil(base64Data.length / chunkSize) || 1;
+    const sessionId = Math.random().toString(36).substring(2, 7);
 
     this.sendChunks = [];
     for (let i = 0; i < totalChunks; i++) {
-      const chunkSlice = base64Data.substring(i * CHUNK_CHAR_SIZE, (i + 1) * CHUNK_CHAR_SIZE);
+      const chunkSlice = base64Data.substring(i * chunkSize, (i + 1) * chunkSize);
       
-      // パケットフォーマット: GOV|sessionId|total|index|rawSize|sha256Prefix|fileName|chunk
-      const packetStr = `GOV|${sessionId}|${totalChunks}|${i}|${rawBytes.byteLength}|${sha256.substring(0, 16)}|${encodeURIComponent(fileName)}|${chunkSlice}`;
+      // パケットフォーマット: G|sessionId|total|index|shaPrefix|fileName|chunk
+      const packetStr = `G|${sessionId}|${totalChunks}|${i}|${sha256.substring(0, 12)}|${encodeURIComponent(fileName)}|${chunkSlice}`;
       this.sendChunks.push(packetStr);
     }
 
@@ -117,9 +132,7 @@ class DynamicQRTransfer {
   }
 
   /**
-   * Canvas / DOM要素上に高速動的QRコードのアニメーション描画を開始します
-   * @param {HTMLElement} containerEl - QR描画コンテナ
-   * @param {Function} [onProgress] - コマ進捗通知コールバック
+   * Canvas / DOM要素上に動的QRコードのアニメーション描画を開始
    */
   startTransmission(containerEl, onProgress) {
     this.stopTransmission();
@@ -127,9 +140,7 @@ class DynamicQRTransfer {
 
     this.isTransmitting = true;
     const total = this.sendChunks.length;
-    const intervalMs = Math.round(1000 / this.fps);
 
-    // QRコードインスタンス生成用一時要素
     const renderNextFrame = () => {
       if (!this.isTransmitting) return;
 
@@ -139,11 +150,11 @@ class DynamicQRTransfer {
       if (typeof QRCode !== 'undefined') {
         new QRCode(containerEl, {
           text: packet,
-          width: 260,
-          height: 260,
+          width: 300,
+          height: 300,
           colorDark: '#000000',
           colorLight: '#ffffff',
-          correctLevel: QRCode.CorrectLevel.L // 最大データ容量を確保
+          correctLevel: QRCode.CorrectLevel.L // 最大セルサイズ
         });
       }
 
@@ -155,17 +166,14 @@ class DynamicQRTransfer {
         });
       }
 
-      // 次のフレームへ（ループ再生）
       this.sendIndex = (this.sendIndex + 1) % total;
+      const intervalMs = Math.round(1000 / this.fps);
       this.animationTimer = setTimeout(renderNextFrame, intervalMs);
     };
 
     renderNextFrame();
   }
 
-  /**
-   * 送信アニメーションを停止します
-   */
   stopTransmission() {
     this.isTransmitting = false;
     if (this.animationTimer) {
@@ -175,11 +183,7 @@ class DynamicQRTransfer {
   }
 
   /**
-   * カメラを起動して動的QRコードの高速連続スキャン＆復元を開始します
-   * @param {HTMLVideoElement} videoEl
-   * @param {Function} onProgress - 受信進捗コールバック
-   * @param {Function} onComplete - 復元完了コールバック
-   * @param {Function} onError - エラーコールバック
+   * カメラを起動して動的QRコードの連続スキャンを開始（低画質カメラ用コントラスト補正付き）
    */
   async startReceiving(videoEl, onProgress, onComplete, onError) {
     this.stopReceiving();
@@ -188,7 +192,11 @@ class DynamicQRTransfer {
 
     try {
       this.scannerStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 }
+        }
       });
       videoEl.srcObject = this.scannerStream;
       await videoEl.play();
@@ -206,11 +214,28 @@ class DynamicQRTransfer {
 
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           if (typeof jsQR !== 'undefined') {
-            const code = jsQR(imageData.data, imageData.width, imageData.height, {
-              inversionAttempts: 'dontInvert'
+            // 通常スキャン
+            let code = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'attemptBoth'
             });
 
-            if (code && code.data && code.data.startsWith('GOV|')) {
+            // 低画質・ボケカメラ用：コントラスト強化フォールバック
+            if (!code) {
+              const d = imageData.data;
+              for (let i = 0; i < d.length; i += 4) {
+                // グレースケール＆コントラスト増幅
+                const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
+                const thresh = v > 128 ? 255 : 0;
+                d[i] = thresh;
+                d[i + 1] = thresh;
+                d[i + 2] = thresh;
+              }
+              code = jsQR(d, imageData.width, imageData.height, {
+                inversionAttempts: 'attemptBoth'
+              });
+            }
+
+            if (code && code.data && (code.data.startsWith('G|') || code.data.startsWith('GOV|'))) {
               await this.handleReceivedPacket(code.data, onProgress, onComplete, onError);
             }
           }
@@ -224,23 +249,28 @@ class DynamicQRTransfer {
       requestAnimationFrame(scanLoop);
     } catch (err) {
       console.error('動的QRスキャンカメラ起動失敗:', err);
-      if (onError) onError(new Error('カメラの起動に失敗しました'));
+      if (onError) onError(new Error('カメラの起動に失敗しました（権限またはデバイス接続を確認してください）'));
       this.stopReceiving();
     }
   }
 
   /**
-   * 受信したパケットを処理し、全チャンクが集まったら復元します
+   * 受信パケット処理
    */
   async handleReceivedPacket(packetStr, onProgress, onComplete, onError) {
     try {
       const parts = packetStr.split('|');
-      if (parts.length < 8) return;
+      if (parts.length < 7) return;
 
-      const [tag, sessionId, totalStr, indexStr, rawSizeStr, shaPrefix, encodedFileName, chunkData] = parts;
+      let sessionId, totalStr, indexStr, shaPrefix, encodedFileName, chunkData;
+      if (parts[0] === 'G') {
+        [, sessionId, totalStr, indexStr, shaPrefix, encodedFileName, chunkData] = parts;
+      } else {
+        [, sessionId, totalStr, indexStr, , shaPrefix, encodedFileName, chunkData] = parts;
+      }
+
       const total = parseInt(totalStr, 10);
       const index = parseInt(indexStr, 10);
-      const rawSize = parseInt(rawSizeStr, 10);
       const fileName = decodeURIComponent(encodedFileName);
 
       // 新規セッション開始
@@ -248,7 +278,6 @@ class DynamicQRTransfer {
         this.receiveSession = {
           sessionId,
           total,
-          rawSize,
           shaPrefix,
           fileName,
           chunks: new Array(total).fill(null),
@@ -268,8 +297,7 @@ class DynamicQRTransfer {
             received: this.receiveSession.receivedCount,
             total: total,
             percent: percent,
-            fileName: fileName,
-            rawSize: rawSize
+            fileName: fileName
           });
         }
 
@@ -293,8 +321,12 @@ class DynamicQRTransfer {
           const fileBlob = new Blob([decompressedBytes]);
 
           // 4. SHA-256検証
-          const fullHash = await TransferCrypto.calculateSHA256(fileBlob);
-          const hashMatch = fullHash.startsWith(this.receiveSession.shaPrefix);
+          let fullHash = '';
+          let hashMatch = false;
+          try {
+            fullHash = await TransferCrypto.calculateSHA256(fileBlob);
+            hashMatch = fullHash.startsWith(this.receiveSession.shaPrefix);
+          } catch (e) {}
 
           if (onComplete) {
             onComplete({
@@ -313,9 +345,6 @@ class DynamicQRTransfer {
     }
   }
 
-  /**
-   * 受信スキャンを停止します
-   */
   stopReceiving() {
     this.isReceiving = false;
     if (this.scannerStream) {

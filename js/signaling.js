@@ -180,11 +180,23 @@ class SignalingManager {
    */
   handlePeerConnection(conn) {
     if (!conn) return;
+    console.log(`[Signaling] ピア接続処理中: ${conn.peer}, 状態=${conn.open ? 'open' : 'connecting'}`);
 
+    let isBound = false;
     const bindEngine = () => {
+      if (isBound) return;
+      isBound = true;
+
       // PeerConnectionをエンジンに共有
       if (conn.peerConnection) {
         this.engine.peerConnection = conn.peerConnection;
+
+        conn.peerConnection.oniceconnectionstatechange = () => {
+          console.log(`[WebRTC-ICE] 状態: ${conn.peerConnection.iceConnectionState}`);
+        };
+        conn.peerConnection.onconnectionstatechange = () => {
+          console.log(`[WebRTC-Connection] 状態: ${conn.peerConnection.connectionState}`);
+        };
       }
 
       // RTCDataChannel を取得してエンジンに結合
@@ -207,9 +219,23 @@ class SignalingManager {
       bindEngine();
     } else {
       conn.on('open', () => {
-        console.log('[Signaling] PeerJS DataConnection オープン');
+        console.log('[Signaling] PeerJS DataConnection オープン完了');
         bindEngine();
       });
+
+      // ネイティブ DataChannel の直接フック（PeerJSメッセージハンドシェイクが遅延・途絶した場合のフォールバック）
+      if (conn.peerConnection) {
+        const pc = conn.peerConnection;
+        const originalOnDataChannel = pc.ondatachannel;
+        pc.ondatachannel = (event) => {
+          console.log('[Signaling] ネイティブ DataChannel 受信');
+          if (originalOnDataChannel) originalOnDataChannel.call(pc, event);
+          if (event.channel) {
+            this.engine.setupDataChannel(event.channel);
+            bindEngine();
+          }
+        };
+      }
     }
 
     conn.on('close', () => {

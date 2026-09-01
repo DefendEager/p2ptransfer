@@ -256,6 +256,11 @@ document.addEventListener('DOMContentLoaded', () => {
     startQrSendBtn.addEventListener('click', async () => {
       if (!selectedStrictFile) return;
 
+      const densitySelect = document.getElementById('qrDensitySelect');
+      const fpsSelect = document.getElementById('qrFpsSelect');
+      if (densitySelect) dynamicQr.setDensityMode(densitySelect.value);
+      if (fpsSelect) dynamicQr.setFps(parseInt(fpsSelect.value, 10));
+
       startQrSendBtn.classList.add('hidden');
       stopQrSendBtn.classList.remove('hidden');
       dynamicQrDisplayArea.classList.remove('hidden');

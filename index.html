@@ -149,9 +149,24 @@
         <!-- 動的QR送信側 -->
         <div id="qrSendPanel">
           <div style="display: flex; flex-direction: column; gap: 0.75rem;">
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
               <input type="file" id="strictQrFileInput" class="hidden">
               <button id="selectQrFileBtn" class="btn-secondary" style="flex: 1;">ファイルを選択</button>
+              
+              <!-- 密度設定（低画質PCカメラ用など） -->
+              <select id="qrDensitySelect" class="btn-secondary" style="padding: 0.55rem 0.6rem; font-size: 0.78rem;">
+                <option value="low" selected>低画質PCカメラ用 (超大セル)</option>
+                <option value="medium">標準 (中解像度)</option>
+                <option value="high">スマホ高画質用 (高速)</option>
+              </select>
+
+              <!-- 再生速度設定 -->
+              <select id="qrFpsSelect" class="btn-secondary" style="padding: 0.55rem 0.6rem; font-size: 0.78rem;">
+                <option value="5">低速 (5 fps)</option>
+                <option value="8" selected>標準 (8 fps)</option>
+                <option value="12">高速 (12 fps)</option>
+              </select>
+
               <button id="startQrSendBtn" class="btn-primary" disabled style="flex: 1;">動的QR送信を開始</button>
               <button id="stopQrSendBtn" class="btn-error hidden">送信停止</button>
             </div>
