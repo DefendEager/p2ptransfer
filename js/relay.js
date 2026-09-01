@@ -1,39 +1,21 @@
 /**
  * E2EE 暗号化ゼロ知識HTTPSリレーエンジン
  * 
- * 自治体プロキシ（IWSS）やファイアウォールにより WebRTC P2P が完全に遮断されている環境でも、
- * 通常のWebブラウジングと同じ HTTPS（443ポート POST/GET）通信のみを利用して、
- * 回線上限速度・大容量ファイル対応・完全E2EE暗号化で安全に転送します。
+ * 自治体プロキシ（IWSS / SSLインスペクション）環境下でも、
+ * 証明書エラーを回避し、安全・確実にファイルを送受信するための多重機構を提供します。
  * 
- * 【CORS完全対応 ＆ 多重冗長化設計】
- * 1. Litterbox (Catbox) / FileIO などのCORS完全対応（Access-Control-Allow-Origin: *）APIを採用
- * 2. 受信時のCORSプロキシ自動フォールバック機構を内包し、100%確実にバイナリを取得
- * 3. 送信前ブラウザ内 AES-256-GCM 暗号化 ＆ SHA-256 完全性検証
+ * 【機能】
+ * 1. Web Crypto AES-256-GCM クライアント二重暗号化
+ * 2. 複数の大手・高信頼リレーエンドポイント
+ * 3. 万一の証明書エラー時における「直接ダウンロード ➔ ブラウザ復号」フォールバック
+ * 4. 完全オフライン対応「暗号化ファイル (.govp2p) エクスポート ＆ ドロップ復号」
  */
 
 class E2EERelayTransfer {
   constructor(options = {}) {
     this.options = options;
-    // 複数の高速・CORS対応リレーエンドポイント（冗長化フォールバック）
+    // 大手・CORS対応リレーエンドポイント
     this.relayEndpoints = [
-      {
-        name: 'Litterbox',
-        uploadUrl: 'https://litterbox.catbox.moe/resources/internals/api.php',
-        prepareFormData: (encryptedBlob, fileName) => {
-          const fd = new FormData();
-          fd.append('reqtype', 'fileupload');
-          fd.append('time', '1h'); // 1時間で自動消滅
-          fd.append('fileToUpload', encryptedBlob, fileName);
-          return fd;
-        },
-        parseUploadResponse: async (res) => {
-          const text = (await res.text()).trim();
-          if (text.startsWith('http://') || text.startsWith('https://')) {
-            return { downloadUrl: text };
-          }
-          throw new Error(`Litterbox 応答不正: ${text}`);
-        }
-      },
       {
         name: 'FileIO',
         uploadUrl: 'https://file.io/?expires=1d',
@@ -48,6 +30,24 @@ class E2EERelayTransfer {
             return { downloadUrl: json.link, key: json.key };
           }
           throw new Error('FileIO 応答エラー');
+        }
+      },
+      {
+        name: 'Litterbox',
+        uploadUrl: 'https://litterbox.catbox.moe/resources/internals/api.php',
+        prepareFormData: (encryptedBlob, fileName) => {
+          const fd = new FormData();
+          fd.append('reqtype', 'fileupload');
+          fd.append('time', '1h');
+          fd.append('fileToUpload', encryptedBlob, fileName);
+          return fd;
+        },
+        parseUploadResponse: async (res) => {
+          const text = (await res.text()).trim();
+          if (text.startsWith('http://') || text.startsWith('https://')) {
+            return { downloadUrl: text };
+          }
+          throw new Error(`Litterbox 応答不正: ${text}`);
         }
       },
       {
@@ -72,41 +72,28 @@ class E2EERelayTransfer {
   }
 
   /**
-   * ファイルを暗号化してHTTPSリレーへ送信します
-   * @param {File} file - 送信対象ファイル
-   * @param {string} pin - 6桁のPINコード
-   * @param {Function} [onProgress] - 進捗コールバック (percent, status)
+   * ファイルをブラウザ内で AES-256-GCM 暗号化し、暗号化パケットバッファを生成
    */
-  async sendFile(file, pin, onProgress) {
+  async buildEncryptedPacket(file, pin, onProgress) {
     if (!pin || pin.length < 4) {
       throw new Error('有効なPINコード（4桁以上）を指定してください');
     }
 
-    const startTime = performance.now();
-
-    // 1. PINコードから AES-256-GCM 鍵を導出
     if (onProgress) onProgress({ percent: 5, status: '暗号鍵導出中 (PBKDF2)...' });
     const salt = new TextEncoder().encode(`gov-relay-salt-${pin}`);
     const key = await TransferCrypto.deriveKey(pin, salt);
-    if (!key) {
-      throw new Error('暗号鍵の生成に失敗しました');
-    }
+    if (!key) throw new Error('暗号鍵の生成に失敗しました');
 
-    // 2. ファイル全体の SHA-256 ハッシュを事前計算
     if (onProgress) onProgress({ percent: 15, status: 'SHA-256 ハッシュ計算中...' });
     const originalHash = await TransferCrypto.calculateSHA256(file);
 
-    // 3. ファイルバイナリの読み込み
     if (onProgress) onProgress({ percent: 30, status: 'ファイル読み込み中...' });
     const rawBuffer = await file.arrayBuffer();
 
-    // 4. AES-256-GCM による二重暗号化
     if (onProgress) onProgress({ percent: 50, status: 'AES-256-GCM 暗号化中...' });
     const iv = TransferCrypto.generateIV();
     const encryptedBuffer = await TransferCrypto.encryptBuffer(rawBuffer, key, iv);
 
-    // 5. パケットヘッダーの付与
-    // ヘッダー: [0x52(R), 0x4C(L), IV(12byte), MetaJSONLen(2byte), MetaJSON(UTF-8), EncryptedPayload]
     const metaObj = {
       name: file.name,
       size: file.size,
@@ -126,13 +113,26 @@ class E2EERelayTransfer {
     packetBuffer.set(metaBytes, 16);
     packetBuffer.set(new Uint8Array(encryptedBuffer), headerLen);
 
-    // 6. HTTPSリレーへアップロード（多段フォールバック）
+    return {
+      packetBuffer,
+      originalHash,
+      metaObj
+    };
+  }
+
+  /**
+   * ファイルを暗号化してHTTPSリレーへ送信
+   */
+  async sendFile(file, pin, onProgress) {
+    const startTime = performance.now();
+    const { packetBuffer, originalHash, metaObj } = await this.buildEncryptedPacket(file, pin, onProgress);
+
     if (onProgress) onProgress({ percent: 70, status: 'HTTPSリレーへ暗号化送信中...' });
 
     let uploadResult = null;
     let lastError = null;
     const encryptedBlob = new Blob([packetBuffer], { type: 'application/octet-stream' });
-    const uploadFileName = `secure_payload_${pin}.bin`;
+    const uploadFileName = `secure_payload_${pin}.govp2p`;
 
     for (const endpoint of this.relayEndpoints) {
       try {
@@ -163,7 +163,6 @@ class E2EERelayTransfer {
 
     if (onProgress) onProgress({ percent: 100, status: '送信完了' });
 
-    // 共有用トークンを生成 (Base64エンコードされたURL)
     const relayToken = btoa(uploadResult.downloadUrl);
 
     return {
@@ -173,44 +172,64 @@ class E2EERelayTransfer {
       fileName: file.name,
       size: file.size,
       sha256: originalHash,
-      durationSeconds: (performance.now() - startTime) / 1000
+      durationSeconds: (performance.now() - startTime) / 1000,
+      encryptedBlob: encryptedBlob
     };
   }
 
   /**
-   * CORSフォールバック付きでバイナリを確実にダウンロード
+   * 暗号化バイナリバッファをパースして復号
    */
-  async fetchBinaryWithFallback(downloadUrl) {
-    const urlsToTry = [
-      downloadUrl,
-      `https://corsproxy.io/?${encodeURIComponent(downloadUrl)}`,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(downloadUrl)}`
-    ];
-
-    let lastError = null;
-    for (const url of urlsToTry) {
-      try {
-        console.log(`[Relay] 暗号化バイナリ取得試行: ${url}`);
-        const response = await fetch(url);
-        if (response.ok) {
-          return await response.arrayBuffer();
-        } else {
-          console.warn(`[Relay] HTTP ${response.status} (${url})`);
-        }
-      } catch (e) {
-        console.warn(`[Relay] 取得エラー (${url}):`, e);
-        lastError = e;
-      }
+  async decryptPacketBuffer(packetBuffer, pin, onProgress) {
+    if (packetBuffer.byteLength < 16) {
+      throw new Error('受信データが破損しているか、無効なフォーマットです');
     }
 
-    throw new Error(`ファイルのダウンロードに失敗しました（CORSまたはリンク切れ）: ${lastError ? lastError.message : ''}`);
+    const view = new Uint8Array(packetBuffer);
+    if (view[0] !== 0x52 || view[1] !== 0x4C) {
+      throw new Error('暗号化パケットのシグネチャが一致しません');
+    }
+
+    const iv = view.slice(2, 14);
+    const metaLen = (view[14] << 8) | view[15];
+    const metaBytes = view.slice(16, 16 + metaLen);
+    const metaJson = new TextDecoder().decode(metaBytes);
+    const meta = JSON.parse(metaJson);
+
+    const encryptedPayload = packetBuffer.slice(16 + metaLen);
+
+    if (onProgress) onProgress({ percent: 60, status: '復号鍵導出中 (PBKDF2)...' });
+    const salt = new TextEncoder().encode(`gov-relay-salt-${pin}`);
+    const key = await TransferCrypto.deriveKey(pin, salt);
+    if (!key) throw new Error('暗号鍵の生成に失敗しました');
+
+    if (onProgress) onProgress({ percent: 80, status: 'AES-256-GCM 復号中...' });
+    let decryptedBuffer;
+    try {
+      decryptedBuffer = await TransferCrypto.decryptBuffer(encryptedPayload, key, iv);
+    } catch (err) {
+      throw new Error('復号に失敗しました。PINコードが一致しているか確認してください。');
+    }
+
+    if (onProgress) onProgress({ percent: 95, status: 'SHA-256 完全性検証中...' });
+    const fileBlob = new Blob([decryptedBuffer], { type: meta.type || 'application/octet-stream' });
+    const calculatedHash = await TransferCrypto.calculateSHA256(fileBlob);
+    const hashMatch = (calculatedHash === meta.sha256);
+
+    if (onProgress) onProgress({ percent: 100, status: '完了' });
+
+    return {
+      blob: fileBlob,
+      fileName: meta.name,
+      size: meta.size,
+      type: meta.type,
+      sha256: calculatedHash,
+      hashMatch: hashMatch
+    };
   }
 
   /**
-   * HTTPSリレーから暗号化データをダウンロードし、クライアント側で復号します
-   * @param {string} downloadUrlOrToken - ダウンロードURLまたは共有トークン
-   * @param {string} pin - 6桁のPINコード
-   * @param {Function} [onProgress] - 進捗コールバック (percent, status)
+   * HTTPSリレーから暗号化データをダウンロードし、クライアント側で復号
    */
   async receiveFile(downloadUrlOrToken, pin, onProgress) {
     if (!pin || pin.length < 4) {
@@ -228,62 +247,38 @@ class E2EERelayTransfer {
 
     const startTime = performance.now();
 
-    // 1. 暗号化バイナリをダウンロード (CORSフォールバック付き)
-    if (onProgress) onProgress({ percent: 25, status: '暗号化バイナリを受信中...' });
-    const packetBuffer = await this.fetchBinaryWithFallback(downloadUrl);
+    // 1. 暗号化バイナリをダウンロード
+    if (onProgress) onProgress({ percent: 20, status: '暗号化バイナリを受信中...' });
+    
+    let packetBuffer = null;
+    let fetchError = null;
 
-    if (packetBuffer.byteLength < 16) {
-      throw new Error('受信データが破損しているか、無効なフォーマットです');
-    }
-
-    const view = new Uint8Array(packetBuffer);
-    if (view[0] !== 0x52 || view[1] !== 0x4C) {
-      throw new Error('暗号化パケットのシグネチャが一致しません');
-    }
-
-    // 2. パケットヘッダーの解析
-    const iv = view.slice(2, 14);
-    const metaLen = (view[14] << 8) | view[15];
-    const metaBytes = view.slice(16, 16 + metaLen);
-    const metaJson = new TextDecoder().decode(metaBytes);
-    const meta = JSON.parse(metaJson);
-
-    const encryptedPayload = packetBuffer.slice(16 + metaLen);
-
-    // 3. 鍵導出
-    if (onProgress) onProgress({ percent: 60, status: '復号鍵導出中 (PBKDF2)...' });
-    const salt = new TextEncoder().encode(`gov-relay-salt-${pin}`);
-    const key = await TransferCrypto.deriveKey(pin, salt);
-    if (!key) {
-      throw new Error('暗号鍵の生成に失敗しました');
-    }
-
-    // 4. クライアント側 AES-256-GCM 復号
-    if (onProgress) onProgress({ percent: 80, status: 'AES-256-GCM 復号中...' });
-    let decryptedBuffer;
+    // 直接アクセス試行
     try {
-      decryptedBuffer = await TransferCrypto.decryptBuffer(encryptedPayload, key, iv);
+      const response = await fetch(downloadUrl);
+      if (response.ok) {
+        packetBuffer = await response.arrayBuffer();
+      } else {
+        fetchError = new Error(`HTTP ${response.status}`);
+      }
     } catch (err) {
-      throw new Error('復号に失敗しました。PINコードが一致しているか確認してください。');
+      console.warn('直接fetch失敗 (自治体プロキシ証明書エラー等):', err);
+      fetchError = err;
     }
 
-    // 5. Blob生成 & SHA-256 完全性検証
-    if (onProgress) onProgress({ percent: 95, status: 'SHA-256 完全性検証中...' });
-    const fileBlob = new Blob([decryptedBuffer], { type: meta.type || 'application/octet-stream' });
-    const calculatedHash = await TransferCrypto.calculateSHA256(fileBlob);
-    const hashMatch = (calculatedHash === meta.sha256);
+    // fetchが証明書エラー等で失敗した場合、エラー情報と直接ダウンロードURLを返却
+    if (!packetBuffer) {
+      const err = new Error(`自治体プロキシの証明書制限により、ブラウザの自動通信が遮断されました: ${fetchError ? fetchError.message : ''}`);
+      err.downloadUrl = downloadUrl;
+      err.pin = pin;
+      err.isCertBlocked = true;
+      throw err;
+    }
 
-    if (onProgress) onProgress({ percent: 100, status: '完了' });
-
-    return {
-      blob: fileBlob,
-      fileName: meta.name,
-      size: meta.size,
-      type: meta.type,
-      sha256: calculatedHash,
-      hashMatch: hashMatch,
-      durationSeconds: (performance.now() - startTime) / 1000
-    };
+    // 2. 復号処理
+    const result = await this.decryptPacketBuffer(packetBuffer, pin, onProgress);
+    result.durationSeconds = (performance.now() - startTime) / 1000;
+    return result;
   }
 }
 

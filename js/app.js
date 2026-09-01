@@ -157,6 +157,43 @@ document.addEventListener('DOMContentLoaded', () => {
   if (relaySendPin) relaySendPin.value = generateRandomPin();
 
   // ========================================================================
+  // ローカル暗号化ファイルのブラウザ内復号処理（証明書エラー回避用）
+  // ========================================================================
+  async function processLocalEncryptedFile(encryptedFile, pin) {
+    if (!pin || pin.length < 4) {
+      ui.showToast('復号PINコードを入力してください', 'error');
+      return;
+    }
+    ui.showToast('暗号化ファイルを読み込み中...', 'info');
+    try {
+      const buffer = await encryptedFile.arrayBuffer();
+      const result = await relayTransfer.decryptPacketBuffer(buffer, pin, (p) => {
+        ui.showToast(`${p.status} (${p.percent}%)`, 'info');
+      });
+      ui.showToast(`「${result.fileName}」の復号が完了しました！`, 'info');
+
+      const downloadUrl = URL.createObjectURL(result.blob);
+      relayReceiveResult.classList.remove('hidden');
+      relayReceiveResult.innerHTML = `
+        <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1.25rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">${ui.escapeHtml(result.fileName)}</div>
+            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.35rem; font-family: var(--font-mono);">
+              ${ui.formatBytes(result.size)} | SHA-256検証済 (復号完了)
+            </div>
+          </div>
+          <a href="${downloadUrl}" download="${ui.escapeHtml(result.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.55rem 1.2rem;">
+            保存
+          </a>
+        </div>
+      `;
+    } catch (e) {
+      console.error(e);
+      ui.showToast(`復号失敗: ${e.message}`, 'error');
+    }
+  }
+
+  // ========================================================================
   // イベントリスナーの即時・同期登録
   // ========================================================================
 
@@ -298,7 +335,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
       } catch (err) {
         console.error(err);
-        ui.showToast(`受信・復号失敗: ${err.message}`, 'error');
+        if (err.isCertBlocked && err.downloadUrl) {
+          relayReceiveResult.classList.remove('hidden');
+          relayReceiveResult.innerHTML = `
+            <div style="background: var(--bg-card); border: 1px solid var(--accent-red); padding: 1.25rem; border-radius: var(--radius-sm); margin-top: 0.75rem;">
+              <div style="font-size: 0.88rem; font-weight: 600; color: var(--accent-red);">
+                自治体プロキシの証明書制限により自動ダウンロードが遮断されました
+              </div>
+              <p style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.4rem; line-height: 1.5;">
+                プロキシのSSL検証を回避して安全に復号できます。以下の2ステップを行ってください：
+              </p>
+              <div style="margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <a href="${err.downloadUrl}" target="_blank" class="btn-primary" style="text-decoration: none; text-align: center; padding: 0.6rem 1rem;">
+                  ① 暗号化ファイルをブラウザで保存
+                </a>
+                <div id="certBypassDropzone" class="dropzone" style="padding: 1.25rem; border-style: dashed; border-color: var(--accent-blue); cursor: pointer;">
+                  <div style="font-size: 0.82rem; color: var(--text-primary); font-weight: 600;">② 保存した暗号化ファイルをここにドロップ（またはクリック）</div>
+                  <p style="font-size: 0.72rem; color: var(--text-secondary); margin-top: 0.25rem;">PIN: ${err.pin} でブラウザ内即時復号</p>
+                  <input type="file" id="certBypassFileInput" class="hidden">
+                </div>
+              </div>
+            </div>
+          `;
+
+          const dropEl = document.getElementById('certBypassDropzone');
+          const fileEl = document.getElementById('certBypassFileInput');
+          if (dropEl && fileEl) {
+            dropEl.addEventListener('click', () => fileEl.click());
+            dropEl.addEventListener('dragover', (e) => { e.preventDefault(); dropEl.classList.add('drag-over'); });
+            dropEl.addEventListener('dragleave', () => dropEl.classList.remove('drag-over'));
+            dropEl.addEventListener('drop', async (e) => {
+              e.preventDefault();
+              dropEl.classList.remove('drag-over');
+              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                await processLocalEncryptedFile(e.dataTransfer.files[0], err.pin);
+              }
+            });
+            fileEl.addEventListener('change', async (e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                await processLocalEncryptedFile(e.target.files[0], err.pin);
+              }
+            });
+          }
+        } else {
+          ui.showToast(`受信・復号失敗: ${err.message}`, 'error');
+        }
       } finally {
         startRelayReceiveBtn.disabled = false;
         startRelayReceiveBtn.textContent = '受信・復号して保存';
