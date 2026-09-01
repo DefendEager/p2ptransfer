@@ -1,6 +1,6 @@
 /**
  * アプリケーションメインエントリーポイント
- * 各モジュール（Crypto, WebRTC Engine, Signaling, UI）を連携し、
+ * 各モジュール（Crypto, WebRTC Engine, Signaling, DynamicQR, UI）を連携し、
  * イベントハンドリング、ファイルドラッグ＆ドロップ、複数送信キュー等を制御します。
  */
 
@@ -8,7 +8,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 1. UIマネージャー初期化
   const ui = new UIManager();
 
-  // 2. WebRTC転送エンジン初期化
+  // 2. 動的QR光転送エンジン初期化（厳格セキュリティ下モード用）
+  const dynamicQr = new DynamicQRTransfer();
+
+  // 3. WebRTC転送エンジン初期化
   const engine = new P2PTransferEngine({
     onStatusChange: (state, info) => {
       console.log(`[App] 接続ステータス変更: ${state}`);
@@ -43,6 +46,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     onTextReceived: (msgData) => {
       ui.addTextMessage(msgData, false);
       ui.showToast(`${msgData.sender}: ${msgData.text.substring(0, 20)}...`, 'info');
+
+      // テキスト受信時に自動でテキストタブに切り替え
+      const tabTextBtn = document.getElementById('tabTextBtn');
+      if (tabTextBtn) {
+        tabTextBtn.click();
+      }
     },
     onError: (err) => {
       console.error('[App] エラー:', err);
@@ -53,7 +62,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 3. シグナリングマネージャー初期化
+  // 4. シグナリングマネージャー初期化
   const signaling = new SignalingManager({
     engine: engine,
     onConnected: (info) => {
@@ -72,6 +81,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 送信待機中ファイルキュー
   let stagedFiles = [];
   let isTransferring = false;
+  let selectedStrictFile = null;
 
   // ========================================================================
   // DOM要素参照
@@ -90,17 +100,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   const refreshPinBtn = document.getElementById('refreshPinBtn');
   const targetPinInput = document.getElementById('targetPinInput');
   const connectPinBtn = document.getElementById('connectPinBtn');
+  const cancelConnectBtn = document.getElementById('cancelConnectBtn');
   const openScannerBtn = document.getElementById('openScannerBtn');
   const stopScannerBtn = document.getElementById('stopScannerBtn');
   const closeScannerModalBtn = document.getElementById('closeScannerModalBtn');
   const disconnectBtn = document.getElementById('disconnectBtn');
   const networkStatsBtn = document.getElementById('networkStatsBtn');
 
-  // オフライン接続関連
+  // 接続モードタブ (オンライン / オフライン / 厳格セキュリティ下)
   const tabOnlineBtn = document.getElementById('tabOnlineBtn');
   const tabOfflineBtn = document.getElementById('tabOfflineBtn');
+  const tabStrictQrBtn = document.getElementById('tabStrictQrBtn');
   const onlineConnectView = document.getElementById('onlineConnectView');
   const offlineConnectView = document.getElementById('offlineConnectView');
+  const strictQrConnectView = document.getElementById('strictQrConnectView');
+
+  // オフライン接続関連
   const generateOfferBtn = document.getElementById('generateOfferBtn');
   const offerOutputGroup = document.getElementById('offerOutputGroup');
   const offerTextarea = document.getElementById('offerTextarea');
@@ -112,6 +127,35 @@ document.addEventListener('DOMContentLoaded', async () => {
   const copyAnswerBtn = document.getElementById('copyAnswerBtn');
   const applyAnswerInput = document.getElementById('applyAnswerInput');
   const applyAnswerBtn = document.getElementById('applyAnswerBtn');
+
+  // 厳格セキュリティ下 (動的QR) 関連要素
+  const tabQrSendBtn = document.getElementById('tabQrSendBtn');
+  const tabQrReceiveBtn = document.getElementById('tabQrReceiveBtn');
+  const qrSendPanel = document.getElementById('qrSendPanel');
+  const qrReceivePanel = document.getElementById('qrReceivePanel');
+  const selectQrFileBtn = document.getElementById('selectQrFileBtn');
+  const strictQrFileInput = document.getElementById('strictQrFileInput');
+  const startQrSendBtn = document.getElementById('startQrSendBtn');
+  const stopQrSendBtn = document.getElementById('stopQrSendBtn');
+  const strictQrFileInfo = document.getElementById('strictQrFileInfo');
+  const strictQrFileName = document.getElementById('strictQrFileName');
+  const strictQrFileSize = document.getElementById('strictQrFileSize');
+  const dynamicQrDisplayArea = document.getElementById('dynamicQrDisplayArea');
+  const dynamicQrContainer = document.getElementById('dynamicQrContainer');
+  const qrFrameCurrent = document.getElementById('qrFrameCurrent');
+  const qrFrameTotal = document.getElementById('qrFrameTotal');
+  const qrFramePercent = document.getElementById('qrFramePercent');
+
+  const startQrReceiveBtn = document.getElementById('startQrReceiveBtn');
+  const stopQrReceiveBtn = document.getElementById('stopQrReceiveBtn');
+  const qrScannerContainer = document.getElementById('qrScannerContainer');
+  const strictQrVideo = document.getElementById('strictQrVideo');
+  const strictReceiveCount = document.getElementById('strictReceiveCount');
+  const strictReceiveTotal = document.getElementById('strictReceiveTotal');
+  const strictReceivePercent = document.getElementById('strictReceivePercent');
+  const strictReceiveProgressFill = document.getElementById('strictReceiveProgressFill');
+  const strictReceiveFileName = document.getElementById('strictReceiveFileName');
+  const strictReceiveResult = document.getElementById('strictReceiveResult');
 
   // 作業エリア関連
   const tabFilesBtn = document.getElementById('tabFilesBtn');
@@ -150,7 +194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (err) {
       console.error('ホストセッション初期化失敗:', err);
       myPinCodeEl.textContent = 'エラー';
-      ui.showToast('シグナリング待機中（オフラインモード利用可能）', 'info');
+      ui.showToast('シグナリング待機中（厳格セキュリティ下モード利用可能）', 'info');
     }
   }
 
@@ -161,17 +205,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (pin && pin.length === 6) {
       targetPinInput.value = pin;
       ui.showToast(`PIN [${pin}] を読み込みました。接続中...`, 'info');
-      try {
-        await signaling.joinSession(pin);
-      } catch (e) {
-        ui.showToast(e.message, 'error');
-      }
+      executeConnect(pin);
     } else {
       await initHostSession();
     }
   }
 
   await checkUrlParams();
+
+  // ========================================================================
+  // 接続処理 ＆ キャンセル制御
+  // ========================================================================
+  async function executeConnect(pin) {
+    connectPinBtn.classList.add('hidden');
+    cancelConnectBtn.classList.remove('hidden');
+    targetPinInput.disabled = true;
+
+    try {
+      await signaling.joinSession(pin);
+    } catch (e) {
+      ui.showToast(e.message, 'error');
+    } finally {
+      connectPinBtn.classList.remove('hidden');
+      cancelConnectBtn.classList.add('hidden');
+      targetPinInput.disabled = false;
+    }
+  }
+
+  connectPinBtn.addEventListener('click', () => {
+    const pin = targetPinInput.value.trim();
+    if (!pin || pin.length < 4) {
+      ui.showToast('PINコードを正しく入力してください', 'error');
+      return;
+    }
+    executeConnect(pin);
+  });
+
+  cancelConnectBtn.addEventListener('click', () => {
+    signaling.cancelSession();
+    ui.showToast('接続試行を中止しました', 'info');
+    connectPinBtn.classList.remove('hidden');
+    cancelConnectBtn.classList.add('hidden');
+    targetPinInput.disabled = false;
+  });
 
   // ========================================================================
   // 接続状態ハンドラ
@@ -216,7 +292,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       状態: ${stats.dataChannelState === 'open' ? '通信可能' : stats.dataChannelState}<br>
       経路: ${stats.connectionType}<br>
       遅延: ${stats.rtt}<br>
-      暗号化: Web Crypto AES-256-GCM + DTLS
+      暗号化: Web Crypto AES-256-GCM + DTLS (TURN over TLS対応)
     `;
   }
 
@@ -243,25 +319,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     ui.showToast('新しいPINコードを生成しました', 'info');
   });
 
-  // PIN接続ボタン
-  connectPinBtn.addEventListener('click', async () => {
-    const pin = targetPinInput.value.trim();
-    if (!pin || pin.length < 4) {
-      ui.showToast('PINコードを正しく入力してください', 'error');
-      return;
-    }
-    connectPinBtn.disabled = true;
-    connectPinBtn.textContent = '接続中...';
-    try {
-      await signaling.joinSession(pin);
-    } catch (e) {
-      ui.showToast(e.message, 'error');
-    } finally {
-      connectPinBtn.disabled = false;
-      connectPinBtn.textContent = '接続';
-    }
-  });
-
   // QRコードスキャナー起動
   openScannerBtn.addEventListener('click', () => {
     ui.startQRScanner(async (data) => {
@@ -274,11 +331,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       targetPinInput.value = pinToUse;
       ui.showToast(`PIN [${pinToUse}] を読み取りました。接続中...`, 'info');
-      try {
-        await signaling.joinSession(pinToUse);
-      } catch (e) {
-        ui.showToast(e.message, 'error');
-      }
+      executeConnect(pinToUse);
     });
   });
 
@@ -296,22 +349,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 接続タブ切替 (オンライン / オフライン)
+  // 接続タブ切替 (オンライン / オフライン / 厳格セキュリティ下)
   tabOnlineBtn.addEventListener('click', () => {
     tabOnlineBtn.classList.add('active');
     tabOfflineBtn.classList.remove('active');
+    tabStrictQrBtn.classList.remove('active');
     onlineConnectView.classList.remove('hidden');
     offlineConnectView.classList.add('hidden');
+    strictQrConnectView.classList.add('hidden');
   });
 
   tabOfflineBtn.addEventListener('click', () => {
     tabOfflineBtn.classList.add('active');
     tabOnlineBtn.classList.remove('active');
+    tabStrictQrBtn.classList.remove('active');
     offlineConnectView.classList.remove('hidden');
     onlineConnectView.classList.add('hidden');
+    strictQrConnectView.classList.add('hidden');
   });
 
-  // オフラインシグナリング: オファー生成
+  tabStrictQrBtn.addEventListener('click', () => {
+    tabStrictQrBtn.classList.add('active');
+    tabOnlineBtn.classList.remove('active');
+    tabOfflineBtn.classList.remove('active');
+    strictQrConnectView.classList.remove('hidden');
+    onlineConnectView.classList.add('hidden');
+    offlineConnectView.classList.add('hidden');
+  });
+
+  // オフラインシグナリング
   generateOfferBtn.addEventListener('click', async () => {
     generateOfferBtn.disabled = true;
     generateOfferBtn.textContent = '生成中...';
@@ -335,7 +401,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // オフラインシグナリング: アンサー生成
   generateAnswerBtn.addEventListener('click', async () => {
     const offerStr = inputOfferTextarea.value.trim();
     if (!offerStr) {
@@ -364,7 +429,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // オフラインシグナリング: アンサー適用
   applyAnswerBtn.addEventListener('click', async () => {
     const answerStr = applyAnswerInput.value.trim();
     if (!answerStr) {
@@ -379,7 +443,126 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // ========================================================================
+  // 厳格セキュリティ下モード（動的QR光転送）制御
+  // ========================================================================
+  tabQrSendBtn.addEventListener('click', () => {
+    tabQrSendBtn.classList.add('active');
+    tabQrReceiveBtn.classList.remove('active');
+    qrSendPanel.classList.remove('hidden');
+    qrReceivePanel.classList.add('hidden');
+    dynamicQr.stopReceiving();
+  });
+
+  tabQrReceiveBtn.addEventListener('click', () => {
+    tabQrReceiveBtn.classList.add('active');
+    tabQrSendBtn.classList.remove('active');
+    qrReceivePanel.classList.remove('hidden');
+    qrSendPanel.classList.add('hidden');
+    dynamicQr.stopTransmission();
+  });
+
+  selectQrFileBtn.addEventListener('click', () => strictQrFileInput.click());
+
+  strictQrFileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      selectedStrictFile = e.target.files[0];
+      strictQrFileName.textContent = selectedStrictFile.name;
+      strictQrFileSize.textContent = ui.formatBytes(selectedStrictFile.size);
+      strictQrFileInfo.classList.remove('hidden');
+      startQrSendBtn.disabled = false;
+    }
+  });
+
+  startQrSendBtn.addEventListener('click', async () => {
+    if (!selectedStrictFile) return;
+
+    startQrSendBtn.classList.add('hidden');
+    stopQrSendBtn.classList.remove('hidden');
+    dynamicQrDisplayArea.classList.remove('hidden');
+
+    try {
+      ui.showToast('ファイルをGzip圧縮して動的QRパケットを構築中...', 'info');
+      const prep = await dynamicQr.prepareTransmission(selectedStrictFile);
+      qrFrameTotal.textContent = prep.totalChunks;
+
+      dynamicQr.startTransmission(dynamicQrContainer, (progress) => {
+        qrFrameCurrent.textContent = progress.current;
+        qrFramePercent.textContent = `${progress.percent}%`;
+      });
+      ui.showToast(`動的QR送信を開始しました (全${prep.totalChunks}コマ)`, 'info');
+    } catch (err) {
+      console.error(err);
+      ui.showToast(`動的QR送信エラー: ${err.message}`, 'error');
+      startQrSendBtn.classList.remove('hidden');
+      stopQrSendBtn.classList.add('hidden');
+    }
+  });
+
+  stopQrSendBtn.addEventListener('click', () => {
+    dynamicQr.stopTransmission();
+    startQrSendBtn.classList.remove('hidden');
+    stopQrSendBtn.classList.add('hidden');
+    dynamicQrDisplayArea.classList.add('hidden');
+    ui.showToast('動的QR送信を停止しました', 'info');
+  });
+
+  // 動的QR受信
+  startQrReceiveBtn.addEventListener('click', async () => {
+    startQrReceiveBtn.classList.add('hidden');
+    stopQrReceiveBtn.classList.remove('hidden');
+    qrScannerContainer.classList.remove('hidden');
+    strictReceiveResult.classList.add('hidden');
+
+    await dynamicQr.startReceiving(
+      strictQrVideo,
+      (progress) => {
+        strictReceiveCount.textContent = progress.received;
+        strictReceiveTotal.textContent = progress.total;
+        strictReceivePercent.textContent = `${progress.percent}%`;
+        strictReceiveProgressFill.style.width = `${progress.percent}%`;
+        strictReceiveFileName.textContent = `受信中: ${progress.fileName} (${ui.formatBytes(progress.rawSize)})`;
+      },
+      (completeData) => {
+        ui.showToast(`「${completeData.fileName}」の復元が完了しました`, 'info');
+        startQrReceiveBtn.classList.remove('hidden');
+        stopQrReceiveBtn.classList.add('hidden');
+
+        // 結果ダウンロードボタン描画
+        const downloadUrl = URL.createObjectURL(completeData.blob);
+        strictReceiveResult.classList.remove('hidden');
+        strictReceiveResult.innerHTML = `
+          <div style="background: var(--bg-card); border: 1px solid var(--accent-blue); padding: 1rem; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-weight: 600; color: var(--text-primary); font-size: 0.88rem;">${ui.escapeHtml(completeData.fileName)}</div>
+              <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.2rem; font-family: var(--font-mono);">
+                ${ui.formatBytes(completeData.size)} | SHA-256検証済 (${completeData.durationSeconds.toFixed(1)}秒)
+              </div>
+            </div>
+            <a href="${downloadUrl}" download="${ui.escapeHtml(completeData.fileName)}" class="btn-primary" style="text-decoration: none; padding: 0.45rem 1rem;">
+              保存
+            </a>
+          </div>
+        `;
+      },
+      (err) => {
+        ui.showToast(err.message, 'error');
+        startQrReceiveBtn.classList.remove('hidden');
+        stopQrReceiveBtn.classList.add('hidden');
+      }
+    );
+  });
+
+  stopQrReceiveBtn.addEventListener('click', () => {
+    dynamicQr.stopReceiving();
+    startQrReceiveBtn.classList.remove('hidden');
+    stopQrReceiveBtn.classList.add('hidden');
+    ui.showToast('スキャンを停止しました', 'info');
+  });
+
+  // ========================================================================
   // 作業タブ切替 (ファイル共有 / テキスト共有)
+  // ========================================================================
   tabFilesBtn.addEventListener('click', () => {
     tabFilesBtn.classList.add('active');
     tabTextBtn.classList.remove('active');

@@ -42,13 +42,20 @@ class P2PTransferEngine {
     // 統計情報ポーリング用タイマー
     this.statsInterval = null;
 
-    // デフォルトのICE設定（Cloudflare & Googleの公開STUN + ローカル直接通信用）
+    // デフォルトのICE設定（TURN over TLS 443 TCP + Cloudflare/Google STUN）
     this.defaultRtcConfig = {
       iceServers: [
         { urls: 'stun:stun.cloudflare.com:3478' },
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
+        {
+          urls: [
+            'turns:openrelay.metered.ca:443?transport=tcp',
+            'turn:openrelay.metered.ca:443?transport=tcp',
+            'turn:openrelay.metered.ca:80?transport=tcp'
+          ],
+          username: 'openrelay',
+          credential: 'openrelay'
+        }
       ],
       iceCandidatePoolSize: 10
     };

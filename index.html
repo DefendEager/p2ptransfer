@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>P2P Secure Transfer</title>
-  <meta name="description" content="端末間直接通信（P2P）ファイル・テキスト共有システム。E2EE暗号化、大容量ファイル高速転送、オフライン接続対応。">
+  <meta name="description" content="端末間直接通信（P2P）ファイル・テキスト共有システム。E2EE暗号化、大容量ファイル高速転送、オフライン接続、動的QR光転送対応。">
   
   <!-- Google Fonts: Inter, JetBrains Mono, Outfit -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -46,6 +46,7 @@
         <div class="tab-container" role="tablist">
           <button id="tabOnlineBtn" class="tab-btn active" role="tab" aria-selected="true">オンライン (PIN/QR)</button>
           <button id="tabOfflineBtn" class="tab-btn" role="tab" aria-selected="false">閉域網・オフライン</button>
+          <button id="tabStrictQrBtn" class="tab-btn" role="tab" aria-selected="false">厳格セキュリティ下 (動的QR)</button>
         </div>
       </div>
 
@@ -79,11 +80,12 @@
 
             <div style="display: flex; gap: 0.5rem; width: 100%; margin-top: 0.5rem;">
               <button id="connectPinBtn" class="btn-primary" style="flex: 1;">接続</button>
+              <button id="cancelConnectBtn" class="btn-error hidden" style="flex: 1;">中止</button>
               <button id="openScannerBtn" class="btn-secondary">QR読取</button>
             </div>
             
             <p class="sub-caption">
-              ※PINコードを元にAES-256暗号鍵が自動導出されます
+              ※TURN over TLS (Port 443 TCP) により自治体プロキシ環境下でも接続を試行します
             </p>
           </div>
 
@@ -129,6 +131,76 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- モード3: 厳格セキュリティ下モード（動的QRコード光転送） -->
+      <div id="strictQrConnectView" class="connect-view hidden">
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+          ネットワーク通信（Wi-Fi/4G/外部通信）を1バイトも使わず、画面の高速動的QRコードとカメラ連写（光通信）でファイルを直接転送します。
+        </p>
+
+        <div class="card-header" style="margin-bottom: 1rem;">
+          <div class="tab-container" role="tablist" style="width: 100%;">
+            <button id="tabQrSendBtn" class="tab-btn active" role="tab">画面にQR表示 (送信)</button>
+            <button id="tabQrReceiveBtn" class="tab-btn" role="tab">カメラでQR連続読取 (受信)</button>
+          </div>
+        </div>
+
+        <!-- 動的QR送信側 -->
+        <div id="qrSendPanel">
+          <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <input type="file" id="strictQrFileInput" class="hidden">
+              <button id="selectQrFileBtn" class="btn-secondary" style="flex: 1;">ファイルを選択</button>
+              <button id="startQrSendBtn" class="btn-primary" disabled style="flex: 1;">動的QR送信を開始</button>
+              <button id="stopQrSendBtn" class="btn-error hidden">送信停止</button>
+            </div>
+
+            <div id="strictQrFileInfo" class="hidden" style="font-size: 0.8rem; color: var(--accent-blue); font-family: var(--font-mono);">
+              選択中: <span id="strictQrFileName">-</span> (<span id="strictQrFileSize">-</span>)
+            </div>
+
+            <div id="dynamicQrDisplayArea" class="hidden" style="text-align: center; margin-top: 1rem; background: var(--bg-secondary); padding: 1.25rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+              <div id="dynamicQrContainer" style="display: inline-block; background: #ffffff; padding: 0.75rem; border-radius: var(--radius-sm);"></div>
+              <div style="margin-top: 0.75rem; font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent-blue);">
+                再生中: コマ <span id="qrFrameCurrent">0</span> / <span id="qrFrameTotal">0</span> (<span id="qrFramePercent">0%</span>)
+              </div>
+              <p class="sub-caption" style="margin-top: 0.35rem;">相手端末のカメラでこのQRコードを連続撮影してください</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 動的QR受信側 -->
+        <div id="qrReceivePanel" class="hidden">
+          <div style="display: flex; flex-direction: column; gap: 0.75rem; align-items: center;">
+            <div style="display: flex; gap: 0.5rem; width: 100%;">
+              <button id="startQrReceiveBtn" class="btn-primary" style="flex: 1;">カメラ起動・連続スキャン開始</button>
+              <button id="stopQrReceiveBtn" class="btn-error hidden" style="flex: 1;">スキャン停止</button>
+            </div>
+
+            <div id="qrScannerContainer" class="hidden" style="width: 100%; max-width: 480px; position: relative;">
+              <video id="strictQrVideo" style="width: 100%; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: #000000;" playsinline></video>
+              
+              <!-- 受信進捗モニター -->
+              <div style="margin-top: 0.75rem; background: var(--bg-secondary); padding: 0.85rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color); width: 100%;">
+                <div style="display: flex; justify-content: space-between; font-size: 0.8rem; font-family: var(--font-mono); margin-bottom: 0.4rem;">
+                  <span>収集進捗: <span id="strictReceiveCount" style="color: var(--accent-blue);">0</span> / <span id="strictReceiveTotal">0</span> コマ</span>
+                  <span id="strictReceivePercent" style="color: var(--accent-blue); font-weight: 700;">0%</span>
+                </div>
+                <div class="progress-track">
+                  <div id="strictReceiveProgressFill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="strictReceiveFileName" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.4rem; font-family: var(--font-mono);">
+                  待機中...
+                </div>
+              </div>
+
+              <!-- 受信完了アイテム -->
+              <div id="strictReceiveResult" class="hidden" style="margin-top: 1rem; width: 100%;"></div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </section>
 
@@ -294,13 +366,13 @@
         </div>
 
         <div class="spec-card">
-          <strong style="color: var(--text-primary);">3. SHA-256 完全性検証</strong><br>
-          転送完了時に自動でSHA-256ハッシュ値を照合し、データの破損や改ざんを検知します。
+          <strong style="color: var(--text-primary);">3. 厳格セキュリティ下 (動的QR光転送) 対応</strong><br>
+          外部ネットワーク通信が一切不通の環境でも、Gzip圧縮＋画面の動的QRコードとカメラ連写により完全スタンドアロンで転送可能です。
         </div>
 
         <div class="spec-card">
-          <strong style="color: var(--text-primary);">4. 閉域網・完全オフライン対応</strong><br>
-          外部インターネットが遮断された環境でも、手動SDP交換により同一LAN内で動作します。
+          <strong style="color: var(--text-primary);">4. SHA-256 完全性検証</strong><br>
+          転送完了時に自動でSHA-256ハッシュ値を照合し、データの破損や改ざんを検知します。
         </div>
       </div>
 
@@ -324,6 +396,7 @@
   <script src="js/crypto.js"></script>
   <script src="js/webrtc.js"></script>
   <script src="js/signaling.js"></script>
+  <script src="js/qrtransfer.js"></script>
   <script src="js/ui.js"></script>
   <script src="js/app.js"></script>
 </body>

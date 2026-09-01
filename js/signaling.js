@@ -97,6 +97,25 @@ class SignalingManager {
       const randomClientId = `${this.PIN_PREFIX}client-${Date.now()}-${Math.floor(Math.random()*1000)}`;
       const targetPeerId = `${this.PIN_PREFIX}${pin}`;
 
+      // 15秒の接続タイムアウト
+      let isSettled = false;
+      const timeoutId = setTimeout(() => {
+        if (!isSettled) {
+          isSettled = true;
+          this.destroy();
+          reject(new Error('接続タイムアウト: 相手端末が見つからないか、ネットワーク制限により接続できませんでした'));
+        }
+      }, 15000);
+
+      this.currentReject = (reason) => {
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timeoutId);
+          this.destroy();
+          reject(new Error(reason || '接続がキャンセルされました'));
+        }
+      };
+
       if (this.peer) {
         this.peer.destroy();
       }
@@ -113,22 +132,46 @@ class SignalingManager {
         });
 
         conn.on('open', () => {
-          console.log('[Signaling] ホストとの接続が確立しました！');
-          this.handlePeerConnection(conn);
-          resolve({ pin, connected: true });
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeoutId);
+            console.log('[Signaling] ホストとの接続が確立しました！');
+            this.handlePeerConnection(conn);
+            resolve({ pin, connected: true });
+          }
         });
 
         conn.on('error', (err) => {
-          console.error('[Signaling] 接続エラー:', err);
-          reject(new Error('相手端末が見つかりません。PINコードを確認してください。'));
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeoutId);
+            console.error('[Signaling] 接続エラー:', err);
+            reject(new Error('相手端末が見つかりません。PINコードを確認してください。'));
+          }
         });
       });
 
       this.peer.on('error', (err) => {
-        console.error('[Signaling] Peerエラー:', err);
-        reject(err);
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timeoutId);
+          console.error('[Signaling] Peerエラー:', err);
+          reject(err);
+        }
       });
     });
+  }
+
+  /**
+   * 接続試行を手動でキャンセルします
+   */
+  cancelSession() {
+    if (this.currentReject) {
+      this.currentReject('接続をキャンセルしました');
+      this.currentReject = null;
+    } else {
+      this.destroy();
+    }
   }
 
   /**
