@@ -136,20 +136,38 @@ class SignalingManager {
    * @param {DataConnection} conn
    */
   handlePeerConnection(conn) {
-    // 接続状態の監視
-    conn.on('open', () => {
-      // PeerJS内部の _dc (RTCDataChannel) を高速転送エンジンに直接バインド
-      if (conn._dc) {
-        this.engine.setupDataChannel(conn._dc);
+    if (!conn) return;
+
+    const bindEngine = () => {
+      // PeerConnectionをエンジンに共有
+      if (conn.peerConnection) {
+        this.engine.peerConnection = conn.peerConnection;
       }
+
+      // RTCDataChannel を取得してエンジンに結合
+      const rawDc = conn.dataChannel || conn._dc;
+      if (rawDc) {
+        this.engine.setupDataChannel(rawDc);
+      }
+
       if (this.options.onConnected) {
         this.options.onConnected({
           pin: this.currentPin,
           peerId: conn.peer,
-          isHost: this.isHost
+          isHost: this.isHost,
+          connectionType: 'P2P Direct'
         });
       }
-    });
+    };
+
+    if (conn.open) {
+      bindEngine();
+    } else {
+      conn.on('open', () => {
+        console.log('[Signaling] PeerJS DataConnection オープン');
+        bindEngine();
+      });
+    }
 
     conn.on('close', () => {
       console.log('[Signaling] ピア接続が切断されました');

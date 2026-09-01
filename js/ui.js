@@ -1,12 +1,15 @@
 /**
  * UI管理・インタラクション・描画・QRコード制御モジュール
+ * - 黒背景・白文字ベース
+ * - 重要情報: 青色
+ * - エラー: 赤色
+ * - 不要なアイコン/絵文字の完全排除
  */
 
 class UIManager {
   constructor() {
-    // テーマ設定
-    this.currentTheme = localStorage.getItem('govp2p-theme') || 'dark';
-    document.documentElement.setAttribute('data-theme', this.currentTheme);
+    // スタイル固定（常時ダーク・モノトーン）
+    document.documentElement.setAttribute('data-theme', 'dark');
 
     // QRスキャナー制御用
     this.scannerStream = null;
@@ -15,23 +18,13 @@ class UIManager {
 
     // 指数移動平均（EMA）による滑らかな速度計算用
     this.speedEma = 0;
-    this.EMA_ALPHA = 0.3; // スムージング係数
-  }
-
-  /**
-   * テーマの切り替え（ダーク/ライト）
-   */
-  toggleTheme() {
-    this.currentTheme = this.currentTheme === 'dark' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', this.currentTheme);
-    localStorage.setItem('govp2p-theme', this.currentTheme);
-    this.showToast(`テーマを${this.currentTheme === 'dark' ? 'ダーク' : 'ライト'}に変更しました`, 'info');
+    this.EMA_ALPHA = 0.3;
   }
 
   /**
    * トースト通知を表示
    * @param {string} message - メッセージ
-   * @param {'success'|'error'|'info'} type - 種類
+   * @param {'info'|'error'} type - 種類（info=青/白, error=赤）
    * @param {number} [duration=3500] - 表示時間(ms)
    */
   showToast(message, type = 'info', duration = 3500) {
@@ -39,20 +32,15 @@ class UIManager {
     if (!container) return;
 
     const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    
-    let icon = 'ℹ️';
-    if (type === 'success') icon = '✅';
-    if (type === 'error') icon = '⚠️';
-
-    toast.innerHTML = `<span>${icon}</span><span>${this.escapeHtml(message)}</span>`;
+    toast.className = `toast ${type === 'error' ? 'error' : 'info'}`;
+    toast.innerHTML = `<span>${this.escapeHtml(message)}</span>`;
     container.appendChild(toast);
 
     setTimeout(() => {
       toast.style.opacity = '0';
-      toast.style.transform = 'translateX(30px)';
-      toast.style.transition = 'all 0.3s ease';
-      setTimeout(() => toast.remove(), 300);
+      toast.style.transform = 'translateY(-10px)';
+      toast.style.transition = 'all 0.25s ease';
+      setTimeout(() => toast.remove(), 250);
     }, duration);
   }
 
@@ -64,19 +52,19 @@ class UIManager {
    */
   renderQRCode(element, text, size = 160) {
     if (!element) return;
-    element.innerHTML = ''; // 既存をクリア
+    element.innerHTML = '';
 
     if (typeof QRCode !== 'undefined') {
       new QRCode(element, {
         text: text,
         width: size,
         height: size,
-        colorDark: '#0f172a',
+        colorDark: '#000000',
         colorLight: '#ffffff',
         correctLevel: QRCode.CorrectLevel.M
       });
     } else {
-      element.innerHTML = '<span style="color: red; font-size: 0.75rem;">QRCodeライブラリが読み込まれていません</span>';
+      element.innerHTML = '<span style="color: var(--accent-error); font-size: 0.75rem;">QRCodeライブラリ未読込</span>';
     }
   }
 
@@ -94,7 +82,7 @@ class UIManager {
 
     try {
       this.scannerStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' } // 背面カメラ優先
+        video: { facingMode: 'environment' }
       });
       video.srcObject = this.scannerStream;
       await video.play();
@@ -178,22 +166,22 @@ class UIManager {
     const shaEl = document.getElementById('monitorSha256');
 
     if (fileNameEl) fileNameEl.textContent = data.name;
-    if (dirIconEl) dirIconEl.textContent = data.direction === 'send' ? '📤 送信:' : '📥 受信:';
+    if (dirIconEl) dirIconEl.textContent = data.direction === 'send' ? '送信:' : '受信:';
     
     // ステータスバッジ
     if (badgeEl) {
       if (data.status === 'hashing') {
-        badgeEl.textContent = 'SHA-256計算中';
+        badgeEl.textContent = 'ハッシュ計算中';
       } else if (data.status === 'verifying') {
         badgeEl.textContent = '完全性検証中';
       } else if (data.status === 'completed') {
         badgeEl.textContent = '完了';
       } else {
-        badgeEl.textContent = data.direction === 'send' ? '高速送信中' : '受信中';
+        badgeEl.textContent = data.direction === 'send' ? '送信中' : '受信中';
       }
     }
 
-    // スムーズな速度計算 (EMA)
+    // 速度計算 (EMA)
     if (data.speed > 0) {
       this.speedEma = this.speedEma === 0 ? data.speed : (this.EMA_ALPHA * data.speed + (1 - this.EMA_ALPHA) * this.speedEma);
     }
@@ -204,7 +192,7 @@ class UIManager {
       if (this.speedEma > 0 && data.size > data.transferredBytes) {
         const remainingBytes = data.size - data.transferredBytes;
         const remainingSeconds = Math.ceil(remainingBytes / this.speedEma);
-        etaEl.textContent = `残り約 ${this.formatTime(remainingSeconds)}`;
+        etaEl.textContent = `残り ${this.formatTime(remainingSeconds)}`;
       } else if (data.progress >= 100) {
         etaEl.textContent = '完了';
       } else {
@@ -220,7 +208,7 @@ class UIManager {
 
     if (shaEl && data.sha256) {
       shaEl.textContent = `SHA-256: ${data.sha256.substring(0, 16)}...`;
-      shaEl.title = `SHA-256完全ハッシュ: ${data.sha256}`;
+      shaEl.title = `SHA-256: ${data.sha256}`;
     }
   }
 
@@ -246,7 +234,6 @@ class UIManager {
     historyItem.className = 'history-item';
 
     const isReceive = item.direction === 'receive';
-    const icon = isReceive ? '📥' : '📤';
     const actionLabel = isReceive ? '受信' : '送信';
 
     let downloadButtonHtml = '';
@@ -254,25 +241,24 @@ class UIManager {
       const downloadUrl = URL.createObjectURL(item.blob);
       downloadButtonHtml = `
         <a href="${downloadUrl}" download="${this.escapeHtml(item.name)}" class="btn-primary" style="padding: 0.35rem 0.85rem; font-size: 0.78rem; text-decoration: none;">
-          💾 保存する
+          保存
         </a>
       `;
     }
 
     const verifyBadgeHtml = item.hashMatch !== undefined ? `
-      <span class="sha256-badge ${item.hashMatch ? 'verified' : ''}">
-        ${item.hashMatch ? '✓ SHA-256検証済(改ざん無)' : '⚠️ ハッシュ不一致'}
+      <span class="sha256-badge ${item.hashMatch ? 'verified' : 'error'}">
+        ${item.hashMatch ? 'SHA-256検証済' : 'ハッシュ不一致'}
       </span>
     ` : '';
 
     historyItem.innerHTML = `
       <div class="file-info-group">
-        <span style="font-size: 1.3rem;">${icon}</span>
         <div class="file-meta-text">
           <span class="file-name">${this.escapeHtml(item.name)}</span>
           <div style="display: flex; gap: 0.6rem; align-items: center; margin-top: 0.2rem;">
             <span class="file-size">${this.formatBytes(item.size)}</span>
-            <span style="font-size: 0.72rem; color: var(--text-muted);">(${actionLabel} / ${item.durationSeconds ? item.durationSeconds.toFixed(1) + 's' : ''})</span>
+            <span style="font-size: 0.72rem; color: var(--text-secondary);">[${actionLabel} / ${item.durationSeconds ? item.durationSeconds.toFixed(1) + 's' : ''}]</span>
             ${verifyBadgeHtml}
           </div>
         </div>
@@ -292,8 +278,7 @@ class UIManager {
     const box = document.getElementById('textHistoryBox');
     if (!box) return;
 
-    // 初期案内メッセージを削除
-    const guide = box.querySelector('div[style*="text-align: center"]');
+    const guide = box.querySelector('.text-guide');
     if (guide) guide.remove();
 
     const bubble = document.createElement('div');
@@ -306,32 +291,28 @@ class UIManager {
         <strong>${this.escapeHtml(msg.sender)}</strong>
         <div style="display: flex; gap: 0.5rem; align-items: center;">
           <span>${timeStr}</span>
-          <button class="copy-text-btn" style="background: none; border: none; cursor: pointer; font-size: 0.8rem;" title="クリップボードにコピー">📋</button>
+          <button class="copy-text-btn" title="コピー">コピー</button>
         </div>
       </div>
       <div class="chat-content">${this.escapeHtml(msg.text)}</div>
     `;
 
-    // コピーボタン動作
     const copyBtn = bubble.querySelector('.copy-text-btn');
     if (copyBtn) {
       copyBtn.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(msg.text);
-          this.showToast('クリップボードにコピーしました', 'success');
+          this.showToast('テキストをコピーしました', 'info');
         } catch (e) {
-          this.showToast('コピーに失敗しました', 'error');
+          this.showToast('コピー失敗', 'error');
         }
       });
     }
 
     box.appendChild(bubble);
-    box.scrollTop = box.scrollHeight; // 最下部にスクロール
+    box.scrollTop = box.scrollHeight;
   }
 
-  /**
-   * バイト数を可読形式（KB, MB, GB）に変換
-   */
   formatBytes(bytes) {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -340,9 +321,6 @@ class UIManager {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  /**
-   * 転送速度（Bytes/s）を可読形式（KB/s, MB/s）に変換
-   */
   formatSpeed(bytesPerSec) {
     if (!bytesPerSec || bytesPerSec === 0) return '0.0 MB/s';
     if (bytesPerSec < 1024 * 1024) {
@@ -351,9 +329,6 @@ class UIManager {
     return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
   }
 
-  /**
-   * 秒数を MM:SS または 秒形式に変換
-   */
   formatTime(seconds) {
     if (seconds < 60) return `${seconds}秒`;
     const m = Math.floor(seconds / 60);
@@ -361,9 +336,6 @@ class UIManager {
     return `${m}分${s}秒`;
   }
 
-  /**
-   * XSS防止用 HTML エスケープ
-   */
   escapeHtml(str) {
     if (!str) return '';
     return str

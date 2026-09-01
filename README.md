@@ -67,7 +67,7 @@
    git add .
    git commit -m "Initial commit"
    git branch -M main
-   git remote add origin https://github.com/<あなたのユーザー名>/<リポジトリ名>.git
+   git remote add origin https://github.com/DefendEager/p2ptransfer.git
    git push -u origin main
    ```
 3. リポジトリの **「Settings」** ➔ **「Pages」** を開きます。

@@ -5,10 +5,10 @@
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. 各マネージャーのインスタンス化
+  // 1. UIマネージャー初期化
   const ui = new UIManager();
 
-  // WebRTC転送エンジン初期化
+  // 2. WebRTC転送エンジン初期化
   const engine = new P2PTransferEngine({
     onStatusChange: (state, info) => {
       console.log(`[App] 接続ステータス変更: ${state}`);
@@ -37,12 +37,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         direction: 'receive'
       });
 
-      ui.showToast(`📥 ファイル「${fileData.name}」を受信しました！`, 'success');
+      ui.showToast(`ファイル「${fileData.name}」を受信しました`, 'info');
       setTimeout(() => ui.hideTransferMonitor(), 3000);
     },
     onTextReceived: (msgData) => {
       ui.addTextMessage(msgData, false);
-      ui.showToast(`💬 ${msgData.sender}: ${msgData.text.substring(0, 20)}...`, 'info');
+      ui.showToast(`${msgData.sender}: ${msgData.text.substring(0, 20)}...`, 'info');
     },
     onError: (err) => {
       console.error('[App] エラー:', err);
@@ -53,14 +53,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // シグナリングマネージャー初期化
+  // 3. シグナリングマネージャー初期化
   const signaling = new SignalingManager({
     engine: engine,
     onConnected: (info) => {
-      ui.showToast('✅ 端末とのP2P直接接続が確立しました！', 'success');
+      ui.showToast('端末とのP2P直接接続が確立しました', 'info');
+      onConnectedState(info);
     },
     onDisconnected: () => {
-      ui.showToast('ピア接続が切断されました', 'info');
+      ui.showToast('ピア接続が切断されました', 'error');
       onDisconnectedState();
     },
     onError: (err) => {
@@ -75,7 +76,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ========================================================================
   // DOM要素参照
   // ========================================================================
-  const themeToggleBtn = document.getElementById('themeToggleBtn');
   const securityInfoBtn = document.getElementById('securityInfoBtn');
   const closeSecurityModalBtn = document.getElementById('closeSecurityModalBtn');
   const securityModal = document.getElementById('securityModal');
@@ -150,7 +150,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (err) {
       console.error('ホストセッション初期化失敗:', err);
       myPinCodeEl.textContent = 'エラー';
-      ui.showToast('シグナリングサーバー接続待機中（オフラインモードも利用可能です）', 'info');
+      ui.showToast('シグナリング待機中（オフラインモード利用可能）', 'info');
     }
   }
 
@@ -160,7 +160,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pin = params.get('pin');
     if (pin && pin.length === 6) {
       targetPinInput.value = pin;
-      ui.showToast(`URLからPIN「${pin}」を読み込みました。接続中...`, 'info');
+      ui.showToast(`PIN [${pin}] を読み込みました。接続中...`, 'info');
       try {
         await signaling.joinSession(pin);
       } catch (e) {
@@ -184,15 +184,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const secTag = document.getElementById('headerSecurityTag');
     const secText = document.getElementById('securityText');
     if (secTag && secText) {
-      secText.textContent = 'E2EE AES-256-GCM 接続中';
-      secTag.style.borderColor = 'var(--accent-emerald)';
+      secText.textContent = 'E2EE AES-256 接続中';
     }
 
-    if (info) {
-      const peerTitle = document.getElementById('connectedPeerTitle');
-      const peerDesc = document.getElementById('connectedPeerDesc');
-      if (peerTitle) peerTitle.textContent = `端末と直接接続中 (PIN: ${signaling.currentPin || 'Direct'})`;
-      if (peerDesc) peerDesc.textContent = `通信経路: ${info.connectionType} | 遅延: ${info.rtt}`;
+    const peerTitle = document.getElementById('connectedPeerTitle');
+    const peerDesc = document.getElementById('connectedPeerDesc');
+    const pinStr = signaling.currentPin ? `PIN: ${signaling.currentPin}` : 'P2P Direct';
+    if (peerTitle) peerTitle.textContent = `接続中 (${pinStr})`;
+    
+    if (info && peerDesc) {
+      peerDesc.textContent = `経路: ${info.connectionType || 'P2P Direct'} | 遅延: ${info.rtt || '< 1 ms'}`;
     }
   }
 
@@ -212,10 +213,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const statsEl = document.getElementById('statsContent');
     if (!statsEl) return;
     statsEl.innerHTML = `
-      状態: ${stats.dataChannelState === 'open' ? '✅ 通信可能' : stats.dataChannelState}<br>
+      状態: ${stats.dataChannelState === 'open' ? '通信可能' : stats.dataChannelState}<br>
       経路: ${stats.connectionType}<br>
-      遅延(RTT): ${stats.rtt}<br>
-      暗号化: Web Crypto AES-256-GCM + WebRTC DTLS (二重暗号化)
+      遅延: ${stats.rtt}<br>
+      暗号化: Web Crypto AES-256-GCM + DTLS
     `;
   }
 
@@ -223,20 +224,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // イベントリスナー
   // ========================================================================
 
-  // テーマ切替
-  themeToggleBtn.addEventListener('click', () => ui.toggleTheme());
-
   // セキュリティ仕様モーダル
-  securityInfoBtn.addEventListener('click', () => securityModal.classList.add('open'));
-  networkStatsBtn.addEventListener('click', () => securityModal.classList.add('open'));
-  closeSecurityModalBtn.addEventListener('click', () => securityModal.classList.remove('open'));
+  if (securityInfoBtn) securityInfoBtn.addEventListener('click', () => securityModal.classList.add('open'));
+  if (networkStatsBtn) networkStatsBtn.addEventListener('click', () => securityModal.classList.add('open'));
+  if (closeSecurityModalBtn) closeSecurityModalBtn.addEventListener('click', () => securityModal.classList.remove('open'));
 
   // PINコピー・再生成
   copyPinBtn.addEventListener('click', async () => {
     const pin = myPinCodeEl.textContent;
-    if (pin && pin !== '------') {
+    if (pin && pin !== '------' && pin !== 'エラー') {
       await navigator.clipboard.writeText(pin);
-      ui.showToast(`PINコード (${pin}) をコピーしました`, 'success');
+      ui.showToast(`PINコード (${pin}) をコピーしました`, 'info');
     }
   });
 
@@ -249,7 +247,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   connectPinBtn.addEventListener('click', async () => {
     const pin = targetPinInput.value.trim();
     if (!pin || pin.length < 4) {
-      ui.showToast('正しいPINコードを入力してください', 'error');
+      ui.showToast('PINコードを正しく入力してください', 'error');
       return;
     }
     connectPinBtn.disabled = true;
@@ -260,7 +258,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ui.showToast(e.message, 'error');
     } finally {
       connectPinBtn.disabled = false;
-      connectPinBtn.textContent = '⚡ 接続する';
+      connectPinBtn.textContent = '接続';
     }
   });
 
@@ -275,7 +273,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } catch (e) {}
 
       targetPinInput.value = pinToUse;
-      ui.showToast(`QRコードからPIN「${pinToUse}」を読み取りました。接続中...`, 'info');
+      ui.showToast(`PIN [${pinToUse}] を読み取りました。接続中...`, 'info');
       try {
         await signaling.joinSession(pinToUse);
       } catch (e) {
@@ -316,24 +314,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   // オフラインシグナリング: オファー生成
   generateOfferBtn.addEventListener('click', async () => {
     generateOfferBtn.disabled = true;
-    generateOfferBtn.textContent = 'オファー生成中...';
+    generateOfferBtn.textContent = '生成中...';
     try {
       const offerBase64 = await signaling.createOfflineOffer();
       offerTextarea.value = offerBase64;
       offerOutputGroup.classList.remove('hidden');
-      ui.showToast('オファーSDPが生成されました。相手にコピーして渡してください。', 'success');
+      ui.showToast('オファーSDPを生成しました', 'info');
     } catch (e) {
       ui.showToast(`オファー生成失敗: ${e.message}`, 'error');
     } finally {
       generateOfferBtn.disabled = false;
-      generateOfferBtn.textContent = '① オファーSDPを生成';
+      generateOfferBtn.textContent = 'オファーSDPを生成';
     }
   });
 
   copyOfferBtn.addEventListener('click', async () => {
     if (offerTextarea.value) {
       await navigator.clipboard.writeText(offerTextarea.value);
-      ui.showToast('オファーSDPをクリップボードにコピーしました', 'success');
+      ui.showToast('オファーSDPをコピーしました', 'info');
     }
   });
 
@@ -341,16 +339,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   generateAnswerBtn.addEventListener('click', async () => {
     const offerStr = inputOfferTextarea.value.trim();
     if (!offerStr) {
-      ui.showToast('オファーSDPを貼り付けてください', 'error');
+      ui.showToast('オファーSDPを入力してください', 'error');
       return;
     }
     generateAnswerBtn.disabled = true;
-    generateAnswerBtn.textContent = 'アンサー生成中...';
+    generateAnswerBtn.textContent = '生成中...';
     try {
       const answerBase64 = await signaling.createOfflineAnswer(offerStr);
       answerTextarea.value = answerBase64;
       answerOutputGroup.classList.remove('hidden');
-      ui.showToast('アンサーSDPが生成されました。オファー側に渡してください。', 'success');
+      ui.showToast('アンサーSDPを生成しました', 'info');
     } catch (e) {
       ui.showToast(`アンサー生成失敗: ${e.message}`, 'error');
     } finally {
@@ -362,7 +360,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   copyAnswerBtn.addEventListener('click', async () => {
     if (answerTextarea.value) {
       await navigator.clipboard.writeText(answerTextarea.value);
-      ui.showToast('アンサーSDPをクリップボードにコピーしました', 'success');
+      ui.showToast('アンサーSDPをコピーしました', 'info');
     }
   });
 
@@ -370,7 +368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyAnswerBtn.addEventListener('click', async () => {
     const answerStr = applyAnswerInput.value.trim();
     if (!answerStr) {
-      ui.showToast('アンサーSDPを貼り付けてください', 'error');
+      ui.showToast('アンサーSDPを入力してください', 'error');
       return;
     }
     try {
@@ -421,7 +419,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   fileInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files.length > 0) {
       addFilesToStage(Array.from(e.target.files));
-      fileInput.value = ''; // リセット
+      fileInput.value = '';
     }
   });
 
@@ -447,22 +445,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       itemEl.className = 'staged-file-item';
       itemEl.innerHTML = `
         <div class="file-info-group">
-          <span class="file-icon">📄</span>
           <div class="file-meta-text">
             <span class="file-name">${ui.escapeHtml(file.name)}</span>
             <span class="file-size">${ui.formatBytes(file.size)}</span>
           </div>
         </div>
-        <button class="icon-btn remove-staged-btn" data-index="${index}" style="width: 28px; height: 28px; font-size: 0.8rem;" title="削除">✕</button>
+        <button class="remove-staged-btn" data-index="${index}" title="削除">削除</button>
       `;
       stagedList.appendChild(itemEl);
     });
 
     stagedTotalSize.textContent = ui.formatBytes(totalBytes);
 
-    // 個別削除ボタン
     stagedList.querySelectorAll('.remove-staged-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', () => {
         const idx = parseInt(btn.dataset.index, 10);
         stagedFiles.splice(idx, 1);
         renderStagedFiles();
@@ -476,7 +472,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // ========================================================================
-  // 高速ファイル送信キュー制御（Backpressureパイプライン）
+  // 高速ファイル送信キュー制御
   // ========================================================================
   startSendFilesBtn.addEventListener('click', async () => {
     if (isTransferring || stagedFiles.length === 0) return;
@@ -488,7 +484,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (let i = 0; i < filesToSend.length; i++) {
       const file = filesToSend[i];
       try {
-        ui.showToast(`🚀 [${i+1}/${filesToSend.length}] 「${file.name}」の高速送信を開始...`, 'info');
+        ui.showToast(`[${i+1}/${filesToSend.length}] 「${file.name}」の送信を開始`, 'info');
         const result = await engine.sendFile(file);
 
         ui.addHistoryItem({
@@ -501,7 +497,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           direction: 'send'
         });
 
-        ui.showToast(`✅ 「${file.name}」の送信が完了しました！`, 'success');
+        ui.showToast(`「${file.name}」の送信が完了しました`, 'info');
       } catch (err) {
         console.error('ファイル送信エラー:', err);
         ui.showToast(`「${file.name}」の送信に失敗しました: ${err.message}`, 'error');
@@ -522,7 +518,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (list) {
       list.innerHTML = `
         <p id="emptyHistoryNotice" style="color: var(--text-muted); font-size: 0.82rem; text-align: center; padding: 1.5rem 0;">
-          転送履歴はまだありません
+          転送履歴はありません
         </p>
       `;
       ui.showToast('履歴を消去しました', 'info');
@@ -537,9 +533,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!text) return;
 
     try {
-      const msgObj = await engine.sendTextMessage(text, '自分');
+      await engine.sendTextMessage(text, '送信');
       ui.addTextMessage({
-        sender: '自分',
+        sender: '送信',
         text: text,
         timestamp: Date.now()
       }, true);
